@@ -69,6 +69,18 @@ Step 5 — Verifying Tamper-Evident Chain Integrity
   from its stored content. No tampering detected.
 ```
 
+## Live Compliance Report
+
+[**View live demo report →**](https://divyaravitech.github.io/ConsentBus/compliance-report.html)
+
+The report above shows a real ConsentBus run demonstrating:
+- **Three-way outcome classification** — APPLIED / FAILED / NOT_SUPPORTED
+- **Coverage score** — computed as APPLIED ÷ (APPLIED + FAILED), excluding NOT_SUPPORTED from the denominator (Patent Claim 5)
+- **Tamper-evident HMAC-SHA256 chain** — every entry links cryptographically to the previous one
+- **Exportable ComplianceAttestationReport** — machine-readable JSON, digitally signable for regulators
+
+> Run it yourself: `swift run ConsentBusDemo`
+
 ## Supported SDK Adapters
 
 | SDK | analyticsStorage | adStorage | adPersonalization | adUserData | personalization | measurement | guardianMediated |

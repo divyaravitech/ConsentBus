@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ConsentBus — Live Compliance Report</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Inter:wght@300;400;500;600;700&display=swap');
+:root {
+  --bg: #0b0f14; --surface: #111820; --surface2: #172030;
+  --border: #1e2d3d; --border2: #243548; --text: #c8d8e8;
+  --muted: #4a6480; --dim: #2a3f55;
+  --applied: #00c896; --failed: #ff4d6a; --unsupported: #f0a050;
+  --chain: #5090ff; --mono: 'JetBrains Mono', monospace; --sans: 'Inter', sans-serif;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:var(--bg); color:var(--text); font-family:var(--sans); min-height:100vh; padding:2rem 1rem; }
+body::before { content:''; position:fixed; inset:0; background-image:linear-gradient(var(--border) 1px,transparent 1px),linear-gradient(90deg,var(--border) 1px,transparent 1px); background-size:48px 48px; opacity:0.25; pointer-events:none; }
+.wrap { max-width:860px; margin:0 auto; position:relative; z-index:1; }
+.header { margin-bottom:2.5rem; padding-bottom:1.5rem; border-bottom:1px solid var(--border2); }
+.patent-badge { display:inline-flex; align-items:center; gap:0.5rem; font-family:var(--mono); font-size:0.65rem; letter-spacing:0.12em; text-transform:uppercase; color:var(--applied); border:1px solid rgba(0,200,150,0.25); background:rgba(0,200,150,0.06); padding:0.3rem 0.7rem; border-radius:3px; margin-bottom:1rem; }
+.pulse { width:6px; height:6px; border-radius:50%; background:var(--applied); animation:pulse 2s infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+h1 { font-size:clamp(1.6rem,4vw,2.4rem); font-weight:700; letter-spacing:-0.02em; line-height:1.15; margin-bottom:0.6rem; }
+h1 span { color:var(--applied); }
+.tagline { font-size:0.9rem; color:var(--muted); line-height:1.6; max-width:600px; }
+.meta-row { display:flex; gap:1px; background:var(--border2); border:1px solid var(--border2); border-radius:8px; overflow:hidden; margin-bottom:2rem; }
+.meta-cell { flex:1; background:var(--surface); padding:0.9rem 1.1rem; }
+.meta-label { font-family:var(--mono); font-size:0.58rem; letter-spacing:0.15em; text-transform:uppercase; color:var(--muted); margin-bottom:0.3rem; }
+.meta-value { font-family:var(--mono); font-size:0.9rem; font-weight:700; color:var(--text); }
+.meta-value.green { color:var(--applied); }
+.meta-value.blue { color:var(--chain); }
+.section { margin-bottom:1.5rem; }
+.section-header { display:flex; align-items:center; gap:0.8rem; margin-bottom:0.8rem; }
+.section-num { font-family:var(--mono); font-size:0.62rem; color:var(--muted); letter-spacing:0.1em; background:var(--surface2); border:1px solid var(--border2); padding:0.2rem 0.5rem; border-radius:3px; }
+.section-title { font-size:0.82rem; font-weight:600; letter-spacing:0.03em; text-transform:uppercase; color:var(--muted); }
+.section-line { flex:1; height:1px; background:var(--border); }
+.adapters { display:flex; flex-direction:column; gap:8px; }
+.adapter-row { background:var(--surface); border:1px solid var(--border2); border-radius:8px; padding:1rem 1.2rem; display:grid; grid-template-columns:100px 1fr auto; gap:1rem; align-items:start; transition:border-color 0.2s; }
+.adapter-row:hover { border-color:var(--dim); }
+.status-pill { display:inline-flex; align-items:center; gap:0.4rem; font-family:var(--mono); font-size:0.65rem; font-weight:700; letter-spacing:0.08em; padding:0.25rem 0.6rem; border-radius:3px; white-space:nowrap; }
+.pill-applied { background:rgba(0,200,150,0.1); color:var(--applied); border:1px solid rgba(0,200,150,0.25); }
+.pill-failed { background:rgba(255,77,106,0.1); color:var(--failed); border:1px solid rgba(255,77,106,0.25); }
+.pill-unsupported { background:rgba(240,160,80,0.1); color:var(--unsupported); border:1px solid rgba(240,160,80,0.25); }
+.sdk-id { font-family:var(--mono); font-size:0.78rem; color:var(--text); font-weight:500; margin-bottom:0.2rem; }
+.sdk-version { font-family:var(--mono); font-size:0.65rem; color:var(--muted); margin-bottom:0.4rem; }
+.sdk-method { font-family:var(--mono); font-size:0.7rem; color:var(--chain); background:rgba(80,144,255,0.06); border:1px solid rgba(80,144,255,0.15); padding:0.2rem 0.5rem; border-radius:3px; display:inline-block; }
+.sdk-error { font-family:var(--mono); font-size:0.68rem; color:var(--failed); margin-top:0.3rem; display:flex; align-items:center; gap:0.3rem; }
+.sdk-note { font-family:var(--mono); font-size:0.65rem; color:var(--unsupported); margin-top:0.3rem; }
+.score-block { background:var(--surface); border:1px solid var(--border2); border-radius:8px; padding:1.4rem; margin-bottom:1.5rem; display:grid; grid-template-columns:160px 1fr; gap:1.5rem; align-items:center; }
+.score-dial { position:relative; width:120px; height:120px; margin:0 auto; }
+.score-svg { width:100%; height:100%; }
+.score-number { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; }
+.score-big { font-family:var(--mono); font-size:1.8rem; font-weight:700; color:var(--applied); line-height:1; }
+.score-pct { font-family:var(--mono); font-size:0.65rem; color:var(--muted); }
+.score-detail-title { font-size:0.82rem; font-weight:600; color:var(--text); margin-bottom:0.6rem; }
+.score-row { display:flex; align-items:center; gap:0.6rem; margin-bottom:0.4rem; font-family:var(--mono); font-size:0.72rem; }
+.score-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+.score-bar-wrap { flex:1; height:4px; background:var(--border2); border-radius:999px; overflow:hidden; }
+.score-bar-fill { height:100%; border-radius:999px; }
+.score-label { color:var(--muted); min-width:30px; text-align:right; }
+.insight { background:rgba(240,160,80,0.05); border:1px solid rgba(240,160,80,0.2); border-radius:8px; padding:0.9rem 1.1rem; margin-top:1rem; display:flex; gap:0.7rem; align-items:flex-start; }
+.insight p { font-size:0.78rem; color:#c8a060; line-height:1.6; font-family:var(--mono); }
+.insight p strong { color:var(--unsupported); }
+.chain-block { background:var(--surface); border:1px solid var(--border2); border-radius:8px; padding:1.2rem; margin-bottom:1.5rem; }
+.chain-valid { display:flex; align-items:center; gap:0.7rem; margin-bottom:1rem; padding-bottom:0.8rem; border-bottom:1px solid var(--border); }
+.chain-valid-badge { display:flex; align-items:center; gap:0.4rem; font-family:var(--mono); font-size:0.72rem; color:var(--applied); font-weight:700; }
+.checkmark { width:18px; height:18px; background:rgba(0,200,150,0.12); border:1px solid rgba(0,200,150,0.3); border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:0.65rem; }
+.chain-valid-desc { font-size:0.75rem; color:var(--muted); font-family:var(--mono); }
+.chain-entries { display:flex; flex-direction:column; gap:6px; }
+.chain-entry { display:flex; gap:0; align-items:stretch; }
+.chain-entry-left { display:flex; flex-direction:column; align-items:center; padding-right:0.8rem; flex-shrink:0; }
+.chain-node { width:10px; height:10px; border-radius:50%; background:var(--chain); border:2px solid var(--bg); box-shadow:0 0 0 1px var(--chain); flex-shrink:0; margin-top:0.25rem; }
+.chain-node.genesis { background:var(--muted); box-shadow:0 0 0 1px var(--muted); }
+.chain-connector { width:2px; flex:1; background:rgba(80,144,255,0.2); margin:3px 0; }
+.chain-entry:last-child .chain-connector { display:none; }
+.chain-entry-content { flex:1; padding-bottom:8px; }
+.chain-entry-label { font-family:var(--mono); font-size:0.6rem; color:var(--muted); letter-spacing:0.1em; text-transform:uppercase; margin-bottom:0.2rem; }
+.chain-hash { font-family:var(--mono); font-size:0.72rem; color:var(--chain); word-break:break-all; line-height:1.4; }
+.chain-hash.genesis { color:var(--muted); }
+.json-block { background:#080d12; border:1px solid var(--border2); border-radius:8px; overflow:hidden; margin-bottom:1.5rem; }
+.json-header { background:var(--surface2); border-bottom:1px solid var(--border2); padding:0.6rem 1rem; display:flex; align-items:center; justify-content:space-between; }
+.json-label { font-family:var(--mono); font-size:0.65rem; color:var(--muted); letter-spacing:0.1em; text-transform:uppercase; }
+.json-copy { font-family:var(--mono); font-size:0.62rem; color:var(--muted); cursor:pointer; border:1px solid var(--border2); background:var(--surface); padding:0.15rem 0.5rem; border-radius:3px; transition:all 0.15s; }
+.json-copy:hover { color:var(--text); border-color:var(--dim); }
+.json-body { padding:1.2rem; font-family:var(--mono); font-size:0.75rem; line-height:1.75; overflow-x:auto; color:#8ba8c4; }
+.j-key { color:#7db8d8; } .j-str { color:#a8d080; } .j-num { color:#f0c060; }
+.j-hash { color:var(--chain); } .j-applied { color:var(--applied); }
+.j-failed { color:var(--failed); } .j-unsupported { color:var(--unsupported); }
+.footer { margin-top:3rem; padding-top:1.5rem; border-top:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:1rem; }
+.footer-left { font-family:var(--mono); font-size:0.65rem; color:var(--muted); line-height:1.7; }
+.footer-link { color:var(--chain); text-decoration:none; font-family:var(--mono); font-size:0.65rem; }
+.footer-link:hover { text-decoration:underline; }
+@media(max-width:600px) { .adapter-row{grid-template-columns:1fr} .score-block{grid-template-columns:1fr} .meta-row{flex-direction:column} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="header">
+    <div class="patent-badge"><div class="pulse"></div>Patent Pending · US 64/087,949</div>
+    <h1>ConsentBus<br><span>Live Compliance Report</span></h1>
+    <p class="tagline">Atomic, cryptographically verifiable consent propagation across heterogeneous mobile SDKs. Every SDK adapter returns a receipt. Every receipt is woven into a tamper-evident HMAC-SHA256 chain.</p>
+  </div>
+  <div class="meta-row">
+    <div class="meta-cell"><div class="meta-label">Consent Version</div><div class="meta-value blue">#2</div></div>
+    <div class="meta-cell"><div class="meta-label">Generated At</div><div class="meta-value" style="font-size:0.78rem">2026-07-07T19:15:47Z</div></div>
+    <div class="meta-cell"><div class="meta-label">Coverage Score</div><div class="meta-value green">50%</div></div>
+    <div class="meta-cell"><div class="meta-label">Chain Integrity</div><div class="meta-value green">✓ VALID</div></div>
+    <div class="meta-cell"><div class="meta-label">Adapters</div><div class="meta-value">3 registered</div></div>
+  </div>
+  <div class="section">
+    <div class="section-header"><span class="section-num">STEP 1</span><span class="section-title">Registered SDK Adapters</span><div class="section-line"></div></div>
+    <div class="adapters">
+      <div class="adapter-row" style="border-color:rgba(0,200,150,0.15)">
+        <div><span class="status-pill pill-applied">● APPLIED</span></div>
+        <div><div class="sdk-id">com.example.mock.alwayssucceeds</div><div class="sdk-version">v1.4.2</div><div class="sdk-method">MockSDK.setConsent(.adPersonalization, revoked)</div></div>
+        <div style="font-family:var(--mono);font-size:0.65rem;color:var(--muted);text-align:right">Always applies<br>consent successfully</div>
+      </div>
+      <div class="adapter-row" style="border-color:rgba(255,77,106,0.15)">
+        <div><span class="status-pill pill-failed">● FAILED</span></div>
+        <div><div class="sdk-id">com.example.mock.alwaysfails</div><div class="sdk-version">v0.8.0-beta</div><div class="sdk-error">⚠ Simulated network timeout while applying consent</div></div>
+        <div style="font-family:var(--mono);font-size:0.65rem;color:var(--muted);text-align:right">Always fails<br>to apply consent</div>
+      </div>
+      <div class="adapter-row" style="border-color:rgba(240,160,80,0.15)">
+        <div><span class="status-pill pill-unsupported">● NOT_SUPPORTED</span></div>
+        <div><div class="sdk-id">com.example.mock.partialsupport</div><div class="sdk-version">v3.1.0</div><div class="sdk-note">Purpose adPersonalization not in declared schema</div></div>
+        <div style="font-family:var(--mono);font-size:0.65rem;color:var(--muted);text-align:right">Supports 5 of 10<br>consent purposes</div>
+      </div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-header"><span class="section-num">STEP 4</span><span class="section-title">Compliance Coverage Score</span><div class="section-line"></div></div>
+    <div class="score-block">
+      <div class="score-dial">
+        <svg class="score-svg" viewBox="0 0 120 120">
+          <circle cx="60" cy="60" r="50" fill="none" stroke="#1e2d3d" stroke-width="8"/>
+          <circle cx="60" cy="60" r="50" fill="none" stroke="#00c896" stroke-width="8" stroke-dasharray="157 157" stroke-dashoffset="78.5" stroke-linecap="round" transform="rotate(-90 60 60)" style="filter:drop-shadow(0 0 6px rgba(0,200,150,0.4))"/>
+          <circle cx="60" cy="60" r="50" fill="none" stroke="#ff4d6a" stroke-width="8" stroke-dasharray="157 157" stroke-dashoffset="-78.5" stroke-linecap="round" transform="rotate(-90 60 60)" style="filter:drop-shadow(0 0 4px rgba(255,77,106,0.3))"/>
+        </svg>
+        <div class="score-number"><div class="score-big">50</div><div class="score-pct">% coverage</div></div>
+      </div>
+      <div>
+        <div class="score-detail-title">Propagation Breakdown</div>
+        <div class="score-row"><div class="score-dot" style="background:var(--applied)"></div><span style="color:var(--applied);font-size:0.72rem;min-width:90px">APPLIED</span><div class="score-bar-wrap"><div class="score-bar-fill" style="width:50%;background:var(--applied)"></div></div><span class="score-label">1</span></div>
+        <div class="score-row"><div class="score-dot" style="background:var(--failed)"></div><span style="color:var(--failed);font-size:0.72rem;min-width:90px">FAILED</span><div class="score-bar-wrap"><div class="score-bar-fill" style="width:50%;background:var(--failed)"></div></div><span class="score-label">1</span></div>
+        <div class="score-row"><div class="score-dot" style="background:var(--unsupported)"></div><span style="color:var(--unsupported);font-size:0.72rem;min-width:90px">NOT_SUPPORTED</span><div class="score-bar-wrap"><div class="score-bar-fill" style="width:33%;background:var(--unsupported)"></div></div><span class="score-label">1*</span></div>
+        <div class="insight"><span style="font-size:0.9rem;flex-shrink:0">💡</span><p><strong>Claim 5:</strong> NOT_SUPPORTED is excluded from the coverage denominator. Score = 1 APPLIED ÷ (1 APPLIED + 1 FAILED) = <strong>50%</strong>. No prior art system makes this distinction.</p></div>
+      </div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-header"><span class="section-num">STEP 5</span><span class="section-title">Tamper-Evident Chain Integrity</span><div class="section-line"></div></div>
+    <div class="chain-block">
+      <div class="chain-valid">
+        <div class="chain-valid-badge"><div class="checkmark">✓</div>VALID</div>
+        <div class="chain-valid-desc">Every ledger entry's HMAC-SHA256 hash correctly chains to the one before it, and each entry's hash matches a fresh recomputation from its stored content. No tampering detected.</div>
+      </div>
+      <div class="chain-entries">
+        <div class="chain-entry"><div class="chain-entry-left"><div class="chain-node genesis"></div><div class="chain-connector"></div></div><div class="chain-entry-content"><div class="chain-entry-label">Genesis</div><div class="chain-hash genesis">GENESIS</div></div></div>
+        <div class="chain-entry"><div class="chain-entry-left"><div class="chain-node"></div><div class="chain-connector"></div></div><div class="chain-entry-content"><div class="chain-entry-label">Entry #1 · analyticsStorage · REVOKED</div><div class="chain-hash">99384dd535544db1f711434d0a0907805dc88a5ba7b0b49b7a75978a6e15df49</div></div></div>
+        <div class="chain-entry"><div class="chain-entry-left"><div class="chain-node"></div></div><div class="chain-entry-content"><div class="chain-entry-label">Entry #2 · adPersonalization · REVOKED</div><div class="chain-hash">1b7d28f7314587d420d530be51095b6fcd6969a9719eb30a6a8eb96a26c638e0</div></div></div>
+      </div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-header"><span class="section-num">REPORT</span><span class="section-title">Raw ComplianceAttestationReport</span><div class="section-line"></div></div>
+    <div class="json-block">
+      <div class="json-header"><span class="json-label">application/json · exportable · digitally signable</span><button class="json-copy" onclick="copyJSON()">copy</button></div>
+      <div class="json-body">
+<span class="j-key">{</span>
+  <span class="j-key">"chainProof"</span>: [
+    <span class="j-hash">"99384dd535544db1f711434d0a0907805dc88a5ba7b0b49b7a75978a6e15df49"</span>,
+    <span class="j-hash">"1b7d28f7314587d420d530be51095b6fcd6969a9719eb30a6a8eb96a26c638e0"</span>
+  ],
+  <span class="j-key">"consentVersion"</span>: <span class="j-num">2</span>,
+  <span class="j-key">"coverageScore"</span>: <span class="j-num">50</span>,
+  <span class="j-key">"generatedAt"</span>: <span class="j-str">"2026-07-07T19:15:47Z"</span>,
+  <span class="j-key">"propagationTable"</span>: [
+    {
+      <span class="j-key">"nativeMethodCall"</span>: <span class="j-str">"MockSDK.setConsent(.adPersonalization, revoked)"</span>,
+      <span class="j-key">"sdkIdentifier"</span>: <span class="j-str">"com.example.mock.alwayssucceeds"</span>,
+      <span class="j-key">"sdkVersion"</span>: <span class="j-str">"1.4.2"</span>,
+      <span class="j-key">"status"</span>: <span class="j-applied">"APPLIED"</span>
+    },
+    {
+      <span class="j-key">"nativeMethodCall"</span>: <span class="j-str">"N/A"</span>,
+      <span class="j-key">"sdkIdentifier"</span>: <span class="j-str">"com.example.mock.alwaysfails"</span>,
+      <span class="j-key">"sdkVersion"</span>: <span class="j-str">"0.8.0-beta"</span>,
+      <span class="j-key">"status"</span>: <span class="j-failed">"FAILED"</span>
+    },
+    {
+      <span class="j-key">"nativeMethodCall"</span>: <span class="j-str">"N/A"</span>,
+      <span class="j-key">"sdkIdentifier"</span>: <span class="j-str">"com.example.mock.partialsupport"</span>,
+      <span class="j-key">"sdkVersion"</span>: <span class="j-str">"3.1.0"</span>,
+      <span class="j-key">"status"</span>: <span class="j-unsupported">"NOT_SUPPORTED"</span>
+    }
+  ]
+<span class="j-key">}</span>
+      </div>
+    </div>
+  </div>
+  <div class="footer">
+    <div class="footer-left"><strong style="color:var(--text)">ConsentBus</strong> · MIT License<br>US Provisional Patent Application No. 64/087,949 · Filed June 11, 2026<br>Inventor: Divya Ravi</div>
+    <a href="https://github.com/divyaravitech/ConsentBus" class="footer-link">github.com/divyaravitech/ConsentBus →</a>
+  </div>
+</div>
+<script>
+function copyJSON() {
+  const raw = `{\n  "chainProof": [\n    "99384dd535544db1f711434d0a0907805dc88a5ba7b0b49b7a75978a6e15df49",\n    "1b7d28f7314587d420d530be51095b6fcd6969a9719eb30a6a8eb96a26c638e0"\n  ],\n  "consentVersion": 2,\n  "coverageScore": 50,\n  "generatedAt": "2026-07-07T19:15:47Z",\n  "propagationTable": [\n    {"nativeMethodCall": "MockSDK.setConsent(.adPersonalization, revoked)","sdkIdentifier": "com.example.mock.alwayssucceeds","sdkVersion": "1.4.2","status": "APPLIED"},\n    {"nativeMethodCall": "N/A","sdkIdentifier": "com.example.mock.alwaysfails","sdkVersion": "0.8.0-beta","status": "FAILED"},\n    {"nativeMethodCall": "N/A","sdkIdentifier": "com.example.mock.partialsupport","sdkVersion": "3.1.0","status": "NOT_SUPPORTED"}\n  ]\n}`;
+  navigator.clipboard.writeText(raw).then(() => {
+    const btn = document.querySelector('.json-copy');
+    btn.textContent = 'copied ✓';
+    btn.style.color = 'var(--applied)';
+    setTimeout(() => { btn.textContent = 'copy'; btn.style.color = ''; }, 2000);
+  });
+}
+</script>
+</body>
+</html>
