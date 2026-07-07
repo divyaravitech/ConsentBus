@@ -32,41 +32,133 @@ import ConsentBus
 
 // Register adapters at app launch
 await ConsentBus.shared.register(adapter: FirebaseConsentAdapterExample())
+await ConsentBus.shared.register(adapter: MetaAudienceNetworkAdapter())
+await ConsentBus.shared.register(adapter: AppsFlyerAdapter())
 
 // Propagate a consent change atomically to all registered SDKs
-try await ConsentBus.shared.setConsent(.revoked, purpose: .adPersonalization, source: .userUI)
+let entry = try await ConsentBus.shared.setConsent(.revoked, purpose: .adPersonalization, source: .userUI)
 
 // Export a compliance report
 let report = await ConsentBus.shared.exportComplianceReport()
+
+// Verify the tamper-evident audit chain
+let isValid = await ConsentBus.shared.verifyAuditChainIntegrity()
 ```
 
-## Architecture
+Running the bundled demo target (`swift run ConsentBusDemo`) produces output like this:
 
 ```
-Application Layer (UI, CMP, OS privacy signals)
-        │
-        ▼
-ConsentBus Broker (singleton, serial execution context)
-   ├── ConsentState FSM
-   ├── Adapter Registry
-   └── Audit Ledger (hash-chained)
-        │
-        ▼
-SDK Adapter Layer (Firebase, Meta, Mixpanel, Unity Ads, ...)
-        │
-        ▼
-Persistence & Compliance Attestation
+────────────────────────────────────────────────────────────────────────
+Step 3 — Revoking adPersonalization
+────────────────────────────────────────────────────────────────────────
+  Ledger entry #2 committed. Adapter receipts:
+  [APPLIED]      com.example.mock.alwayssucceeds (v1.4.2)
+                   → MockSDK.setConsent(.adPersonalization, revoked)
+  [FAILED]       com.example.mock.alwaysfails (v0.8.0-beta)
+                   → N/A
+                   ⚠ Simulated network timeout while applying consent
+  [NOT_SUPPORTED] com.example.mock.partialsupport (v3.1.0)
+                   → N/A
+                   ⚠ Purpose adPersonalization not in declared schema
+
+────────────────────────────────────────────────────────────────────────
+Step 5 — Verifying Tamper-Evident Chain Integrity
+────────────────────────────────────────────────────────────────────────
+  VALID — every ledger entry's HMAC-SHA256 hash correctly chains to the
+  one before it, and each entry's hash matches a fresh recomputation
+  from its stored content. No tampering detected.
 ```
+
+## Supported SDK Adapters
+
+| SDK | analyticsStorage | adStorage | adPersonalization | adUserData | personalization | measurement | guardianMediated |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| [Firebase](Sources/ConsentBus/Adapters/FirebaseConsentAdapterExample.swift) | ✅ | ✅ | ✅ | | | | |
+| [Meta Audience Network](Sources/ConsentBus/Adapters/MetaAudienceNetworkAdapter.swift) | | ✅ | ✅ | ✅ | | | |
+| [AppsFlyer](Sources/ConsentBus/Adapters/AppsFlyerAdapter.swift) | ✅ | | | ✅ | | ✅ | |
+| [Mixpanel](Sources/ConsentBus/Adapters/MixpanelAdapter.swift) | ✅ | | | | ✅ | | |
+| [Unity Ads](Sources/ConsentBus/Adapters/UnityAdsAdapter.swift) | | ✅ | ✅ | | | | ✅ |
+
+All adapters other than Firebase's are currently **stubs** — they compile and return realistic `AdapterReceipt`s but don't call a real vendor SDK yet. Each stub file has a comment showing the real native call it should make. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to wire one up for real.
+
+## How It Works
+
+```
+   Application Layer (consent UI, CMP, OS privacy signals)
+                          │
+                          │ setConsent(.revoked, purpose: .adPersonalization, source: .userUI)
+                          ▼
+   ┌──────────────────────────────────────────────────────────┐
+   │              ConsentBus (singleton, serial actor)         │
+   │                                                            │
+   │   1. Per-purpose FSM validates the transition              │
+   │        .granted -> .revoked  ✓                              │
+   │                                                            │
+   │   2. Dispatch to every registered adapter, one pass,       │
+   │      with exponential-backoff retry on genuine failures    │
+   │        Firebase  ──▶ APPLIED                               │
+   │        Meta      ──▶ APPLIED                               │
+   │        AppsFlyer ──▶ FAILED (retried 3x, then recorded)    │
+   │        Mixpanel  ──▶ NOT_SUPPORTED (outside schema)         │
+   │                                                            │
+   │   3. Commit an HMAC-SHA256-chained LedgerEntry              │
+   │        hash(entry N) = HMAC(hash(entry N-1) | receipts)     │
+   └──────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+          Tamper-evident Audit Ledger (hash-chained)
+                          │
+                          ▼
+        ComplianceAttestationReport (exportable, JSON, signed)
+        coverageScore = APPLIED / (APPLIED + FAILED) × 100
+        NOT_SUPPORTED excluded from the denominator entirely
+```
+
+## Compliance Report Example
+
+```json
+{
+  "chainProof" : [
+    "7f75d2d29286602e7b1e4742c553d45e57d1dddc9acbbf030014c7b2d6fb0ae3",
+    "e0493ca6071541c92f352309ea7f412a77a4a5fc318bdad17eac1b66407882a1"
+  ],
+  "consentVersion" : 2,
+  "coverageScore" : 50,
+  "generatedAt" : "2026-07-07T16:23:51Z",
+  "propagationTable" : [
+    {
+      "sdkIdentifier" : "com.google.firebase",
+      "sdkVersion" : "10.21.0",
+      "status" : "APPLIED",
+      "nativeMethodCall" : "Analytics.setConsent([adPersonalization: denied])"
+    },
+    {
+      "sdkIdentifier" : "com.appsflyer.sdk",
+      "sdkVersion" : "6.14.2",
+      "status" : "FAILED",
+      "nativeMethodCall" : "N/A"
+    },
+    {
+      "sdkIdentifier" : "com.mixpanel.ios-sdk",
+      "sdkVersion" : "4.2.0",
+      "status" : "NOT_SUPPORTED",
+      "nativeMethodCall" : "N/A"
+    }
+  ]
+}
+```
+
+`coverageScore` excludes `NOT_SUPPORTED` entries from the denominator entirely — Mixpanel doesn't declare `adPersonalization` in its capability schema, so it isn't penalized as a compliance failure the way AppsFlyer's genuine `FAILED` receipt is.
 
 ## Status
 
-This is an early-stage reference implementation accompanying a filed patent application. The adapter set currently includes an example Firebase adapter; community contributions for additional SDK adapters (Meta Audience Network, AppsFlyer, Mixpanel, Unity Ads, etc.) are welcome.
+This is an early-stage reference implementation accompanying a filed patent application. Firebase, Meta Audience Network, AppsFlyer, Mixpanel, and Unity Ads adapters exist as reference implementations (Firebase is a fuller worked example; the other four are stubs — see the adapter table above). Community contributions to wire the stubs up to real vendor SDKs, and to add further adapters, are welcome.
 
 **Roadmap:**
-- [ ] Meta Audience Network adapter
-- [ ] AppsFlyer adapter
-- [ ] Mixpanel adapter
-- [ ] Unity Ads adapter
+- [x] Meta Audience Network adapter (stub)
+- [x] AppsFlyer adapter (stub)
+- [x] Mixpanel adapter (stub)
+- [x] Unity Ads adapter (stub)
 - [ ] Android (Kotlin) reference implementation
 - [ ] Per-intent OS privacy declaration schema alignment subsystem
 - [ ] Behavioral verification (network proxy observation)
@@ -77,7 +169,7 @@ This project's core architecture — atomic SDK consent dispatch, receipt-chaine
 
 ## Contributing
 
-Adapters should implement the `ConsentAdapter` protocol in `Sources/ConsentBus/Adapters/ConsentAdapter.swift`. See `FirebaseConsentAdapterExample.swift` for the expected pattern. PRs welcome.
+Adapters should implement the `ConsentAdapter` protocol in `Sources/ConsentBus/Adapters/ConsentAdapter.swift`. See `FirebaseConsentAdapterExample.swift` for the expected pattern. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full step-by-step guide. PRs welcome.
 
 ## License
 

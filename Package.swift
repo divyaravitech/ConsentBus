@@ -12,11 +12,19 @@ let package = Package(
             name: "ConsentBus",
             targets: ["ConsentBus"]
         ),
+        .executable(
+            name: "ConsentBusDemo",
+            targets: ["ConsentBusDemo"]
+        ),
     ],
     targets: [
         .target(
             name: "ConsentBus",
             dependencies: []
+        ),
+        .executableTarget(
+            name: "ConsentBusDemo",
+            dependencies: ["ConsentBus"]
         ),
         .testTarget(
             name: "ConsentBusTests",

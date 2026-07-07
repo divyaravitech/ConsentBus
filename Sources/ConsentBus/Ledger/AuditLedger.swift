@@ -1,5 +1,5 @@
 import Foundation
-import Crypto
+import CryptoKit
 
 /// A single immutable entry in the tamper-evident consent audit ledger.
 ///
@@ -43,15 +43,12 @@ public actor AuditLedger {
     ) throws -> LedgerEntry {
         version += 1
 
-        let receiptsData = try JSONEncoder().encode(receipts)
-        let receiptsString = String(data: receiptsData, encoding: .utf8) ?? ""
-        let payload = "\(lastHash)|\(version)|\(appliedState.rawValue)|\(receiptsString)"
-
-        let mac = HMAC<SHA256>.authenticationCode(
-            for: Data(payload.utf8),
-            using: hmacKey
+        let currentHash = try computeHash(
+            previousHash: lastHash,
+            version: version,
+            appliedState: appliedState,
+            receipts: receipts
         )
-        let currentHash = Data(mac).map { String(format: "%02hhx", $0) }.joined()
 
         let entry = LedgerEntry(
             version: version,
@@ -70,10 +67,20 @@ public actor AuditLedger {
     }
 
     /// Verify the integrity of the entire hash chain from genesis.
+    ///
+    /// Recomputes each entry's HMAC from its stored content (not just the
+    /// previousHash/currentHash linkage) so that post-commit tampering with
+    /// any field — including a nested AdapterReceipt — is detected.
     public func verifyChainIntegrity() -> Bool {
         var expectedPrevious = "GENESIS"
         for entry in entries {
             guard entry.previousHash == expectedPrevious else { return false }
+            guard let recomputed = try? computeHash(
+                previousHash: entry.previousHash,
+                version: entry.version,
+                appliedState: entry.appliedState,
+                receipts: entry.receipts
+            ), recomputed == entry.currentHash else { return false }
             expectedPrevious = entry.currentHash
         }
         return true
@@ -85,5 +92,45 @@ public actor AuditLedger {
 
     public func currentVersion() -> UInt64 {
         version
+    }
+
+    private func computeHash(
+        previousHash: String,
+        version: UInt64,
+        appliedState: ConsentState,
+        receipts: [AdapterReceipt]
+    ) throws -> String {
+        // .sortedKeys is required: JSONEncoder does not otherwise guarantee
+        // stable key ordering across separate encode() calls, which would
+        // make the HMAC non-reproducible between commit() and a later
+        // verifyChainIntegrity() recomputation of the same content.
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let receiptsData = try encoder.encode(receipts)
+        let receiptsString = String(data: receiptsData, encoding: .utf8) ?? ""
+        let payload = "\(previousHash)|\(version)|\(appliedState.rawValue)|\(receiptsString)"
+
+        let mac = HMAC<SHA256>.authenticationCode(
+            for: Data(payload.utf8),
+            using: hmacKey
+        )
+        return Data(mac).map { String(format: "%02hhx", $0) }.joined()
+    }
+
+    /// Test-only hook: overwrite a committed entry's receipts without
+    /// recomputing its hash, to simulate post-commit tampering in tests.
+    /// Internal access only — not part of the public API surface.
+    func _testOnly_corruptEntry(at index: Int, receipts: [AdapterReceipt]) {
+        let existing = entries[index]
+        entries[index] = LedgerEntry(
+            version: existing.version,
+            timestamp: existing.timestamp,
+            purpose: existing.purpose,
+            appliedState: existing.appliedState,
+            sourceSignal: existing.sourceSignal,
+            receipts: receipts,
+            previousHash: existing.previousHash,
+            currentHash: existing.currentHash
+        )
     }
 }

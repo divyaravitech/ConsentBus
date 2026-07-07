@@ -13,7 +13,7 @@ public actor ConsentBus {
     public static let shared = ConsentBus()
 
     private var adapters: [any ConsentAdapter] = []
-    private var fsm = ConsentFSM()
+    private var fsmByPurpose: [ConsentPurpose: ConsentFSM] = [:]
     private let ledger = AuditLedger()
     public lazy var attestationEngine = ComplianceAttestationEngine(ledger: ledger)
 
@@ -38,8 +38,10 @@ public actor ConsentBus {
         purpose: ConsentPurpose,
         source: ConsentSource
     ) async throws -> LedgerEntry {
+        var fsm = fsmByPurpose[purpose] ?? ConsentFSM()
         let previousState = fsm.currentState
         try fsm.transition(to: newState)
+        fsmByPurpose[purpose] = fsm
 
         let version = await ledger.currentVersion() + 1
         let event = ConsentEvent(
@@ -69,14 +71,17 @@ public actor ConsentBus {
     /// Patent reference: Claim 4 — retry mechanism with exponential backoff,
     /// recording each retry as a subsequent ledger entry referencing the
     /// original event version.
-    private func dispatchWithRetry(
+    func dispatchWithRetry(
         adapter: any ConsentAdapter,
         event: ConsentEvent
     ) async -> AdapterReceipt {
         var attempt = 0
         var lastReceipt = await adapter.apply(event)
 
-        while !lastReceipt.success && attempt < maxRetries {
+        // Only FAILED is retry-worthy — NOT_SUPPORTED is a permanent
+        // capability-schema mismatch that retrying can never resolve
+        // (Claim 5 distinguishes the two for exactly this reason).
+        while lastReceipt.status == .failed && attempt < maxRetries {
             attempt += 1
             let delay = baseRetryDelayNanoseconds * UInt64(pow(2.0, Double(attempt - 1)))
             try? await Task.sleep(nanoseconds: min(delay, 30_000_000_000))
@@ -90,7 +95,15 @@ public actor ConsentBus {
         await attestationEngine.generateReport()
     }
 
-    public func currentConsentState() -> ConsentState {
-        fsm.currentState
+    public func currentConsentState(for purpose: ConsentPurpose) -> ConsentState {
+        fsmByPurpose[purpose]?.currentState ?? .unknown
+    }
+
+    /// Verify the tamper-evident audit ledger's hash chain from genesis.
+    ///
+    /// Patent reference: Claim 3 — externally verifiable proof that no
+    /// LedgerEntry has been altered since it was committed.
+    public func verifyAuditChainIntegrity() async -> Bool {
+        await ledger.verifyChainIntegrity()
     }
 }
