@@ -1,3 +1,9 @@
+## Research Paper
+
+📄 **[ConsentBus: Atomic Cross-SDK Privacy Consent Propagation 
+with Cryptographic Audit for Mobile Applications](https://doi.org/10.2139/ssrn.7087439)**  
+*Divya Ravi — SSRN Preprint · DOI: 10.2139/ssrn.7087439 · July 2026*
+
 # ConsentBus
 
 **Atomic, cryptographically verifiable consent propagation across heterogeneous mobile SDKs.**
