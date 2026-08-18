@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 @testable import ConsentBus
 
 final class ConsentFSMTests: XCTestCase {
@@ -13,7 +14,9 @@ final class ConsentFSMTests: XCTestCase {
         var fsm = ConsentFSM()
         try fsm.transition(to: .granted)
         try fsm.transition(to: .expired)
-        XCTAssertThrowsError(try fsm.transition(to: .expired)) { error in
+        // .expired only permits a forward transition to .pending (plus the
+        // self-transition tested separately) — .revoked is genuinely invalid.
+        XCTAssertThrowsError(try fsm.transition(to: .revoked)) { error in
             XCTAssertTrue(error is ConsentError)
         }
     }
@@ -25,6 +28,16 @@ final class ConsentFSMTests: XCTestCase {
         XCTAssertThrowsError(try fsm.transition(to: .granted)) { error in
             XCTAssertTrue(error is ConsentError)
         }
+    }
+
+    func testSameStateTransitionIsIdempotent() throws {
+        var fsm = ConsentFSM()
+        try fsm.transition(to: .revoked)
+        // Re-asserting the current state must not throw — real callers need
+        // this (e.g. re-broadcasting on launch, or syncing a late-joining
+        // adapter to an already-established decision).
+        try fsm.transition(to: .revoked)
+        XCTAssertEqual(fsm.currentState, .revoked)
     }
 }
 
@@ -197,5 +210,178 @@ final class NotSupportedDistinctionTests: XCTestCase {
         XCTAssertEqual(receipt.status, .notSupported)
         XCTAssertNotEqual(receipt.status, .failed)
         XCTAssertFalse(receipt.success)
+    }
+}
+
+final class AuditLedgerPersistenceTests: XCTestCase {
+    func testPersistedLedgerSurvivesReload() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ConsentBusTests-\(UUID().uuidString)", isDirectory: true)
+        let persistence = AuditLedgerPersistence(
+            keychainService: "com.consentbus.tests.\(UUID().uuidString)",
+            keychainAccount: "hmac-key",
+            entriesFileURL: tempDir.appendingPathComponent("ledger.json")
+        )
+        let keyStore = KeychainKeyStore(service: persistence.keychainService, account: persistence.keychainAccount)
+        defer {
+            try? FileManager.default.removeItem(at: tempDir)
+            keyStore.delete()
+        }
+
+        let receipt = AdapterReceipt(
+            sdkIdentifier: "sdk.persist", sdkVersion: "1.0",
+            appliedState: .revoked, purposeApplied: .analyticsStorage,
+            nativeMethodCall: "test", success: true, status: .applied
+        )
+
+        let firstLedger = try AuditLedger(persistence: persistence)
+        _ = try await firstLedger.commit(
+            purpose: .analyticsStorage, appliedState: .revoked,
+            sourceSignal: .userUI, receipts: [receipt]
+        )
+        let firstEntries = await firstLedger.allEntries()
+        XCTAssertEqual(firstEntries.count, 1)
+
+        // A second ledger instance pointed at the same persistence config
+        // reloads the committed entry and its chain still verifies — this
+        // is what makes the ledger real audit evidence instead of an
+        // in-memory convenience log that vanishes on relaunch.
+        let secondLedger = try AuditLedger(persistence: persistence)
+        let reloadedEntries = await secondLedger.allEntries()
+        XCTAssertEqual(reloadedEntries.count, 1)
+        XCTAssertEqual(reloadedEntries.first?.currentHash, firstEntries.first?.currentHash)
+        let isValid = await secondLedger.verifyChainIntegrity()
+        XCTAssertTrue(isValid)
+    }
+}
+
+final class ComplianceReportSigningTests: XCTestCase {
+    func testReportSignatureVerifiesAgainstCorrectPublicKeyOnly() async throws {
+        let ledger = AuditLedger()
+        let signingKey = Curve25519.Signing.PrivateKey()
+        let engine = ComplianceAttestationEngine(ledger: ledger, signingKey: signingKey)
+
+        let receipt = AdapterReceipt(
+            sdkIdentifier: "sdk.sign", sdkVersion: "1.0",
+            appliedState: .revoked, purposeApplied: .analyticsStorage,
+            nativeMethodCall: "test", success: true, status: .applied
+        )
+        _ = try await ledger.commit(
+            purpose: .analyticsStorage, appliedState: .revoked,
+            sourceSignal: .userUI, receipts: [receipt]
+        )
+
+        guard let report = await engine.generateReport() else {
+            XCTFail("expected a report")
+            return
+        }
+
+        XCTAssertTrue(ComplianceAttestationEngine.verify(report, publicKey: signingKey.publicKey))
+
+        // A regulator handed only the report and the WRONG public key must
+        // not be able to verify it — otherwise the signature proves nothing.
+        let wrongKey = Curve25519.Signing.PrivateKey()
+        XCTAssertFalse(ComplianceAttestationEngine.verify(report, publicKey: wrongKey.publicKey))
+    }
+
+    func testTamperedReportFailsSignatureVerification() async throws {
+        let ledger = AuditLedger()
+        let signingKey = Curve25519.Signing.PrivateKey()
+        let engine = ComplianceAttestationEngine(ledger: ledger, signingKey: signingKey)
+
+        // Two receipts with different outcomes so the real coverage score
+        // (50%) is distinguishable from a tampered value — a single
+        // APPLIED receipt would already compute to 100%, making a
+        // "tamper to 100%" test vacuous.
+        let appliedReceipt = AdapterReceipt(
+            sdkIdentifier: "sdk.sign.a", sdkVersion: "1.0",
+            appliedState: .revoked, purposeApplied: .analyticsStorage,
+            nativeMethodCall: "test", success: true, status: .applied
+        )
+        let failedReceipt = AdapterReceipt(
+            sdkIdentifier: "sdk.sign.b", sdkVersion: "1.0",
+            appliedState: .revoked, purposeApplied: .analyticsStorage,
+            nativeMethodCall: "test", success: false, status: .failed
+        )
+        _ = try await ledger.commit(
+            purpose: .analyticsStorage, appliedState: .revoked,
+            sourceSignal: .userUI, receipts: [appliedReceipt, failedReceipt]
+        )
+
+        guard let report = await engine.generateReport() else {
+            XCTFail("expected a report")
+            return
+        }
+        XCTAssertEqual(report.coverageScore, 50.0)
+
+        let tampered = ComplianceAttestationReport(
+            consentVersion: report.consentVersion,
+            generatedAt: report.generatedAt,
+            propagationTable: report.propagationTable,
+            coverageScore: 100.0, // tampered: claim full coverage instead of 50%
+            chainProof: report.chainProof,
+            signature: report.signature
+        )
+
+        XCTAssertFalse(ComplianceAttestationEngine.verify(tampered, publicKey: signingKey.publicKey))
+    }
+}
+
+final class AdapterReplayOnRegisterTests: XCTestCase {
+    // ConsentBus.shared is a true singleton that persists to the REAL
+    // Keychain/disk by default (that's the whole point of the persistence
+    // fix) — any test that touches it, including this one, creates real
+    // artifacts on the developer's machine. Clean them up so `swift test`
+    // never leaves residue in the real login Keychain or on disk. Safe to
+    // run even if ConsentBus.shared keeps working afterward for the rest
+    // of this process: deleting the Keychain item doesn't affect an
+    // already-initialized in-memory singleton, it only prevents leftover
+    // persistence after the test process exits.
+    override class func tearDown() {
+        KeychainKeyStore(
+            service: AuditLedgerPersistence.default.keychainService,
+            account: AuditLedgerPersistence.default.keychainAccount
+        ).delete()
+        KeychainKeyStore(
+            service: ConsentBus.signingKeyKeychainService,
+            account: ConsentBus.signingKeyKeychainAccount
+        ).delete()
+        try? FileManager.default.removeItem(at: AuditLedgerPersistence.default.entriesFileURL)
+        super.tearDown()
+    }
+
+    actor RecordingAdapter: ConsentAdapter {
+        let sdkIdentifier = "test.late.adapter"
+        let sdkVersion = "1.0.0"
+        let capabilitySchema = ConsentCapabilitySchema(
+            sdkIdentifier: "test.late.adapter",
+            supportedPurposes: [.analyticsStorage]
+        )
+        private(set) var receivedEvents: [ConsentEvent] = []
+
+        func apply(_ event: ConsentEvent) async -> AdapterReceipt {
+            receivedEvents.append(event)
+            return AdapterReceipt(
+                sdkIdentifier: sdkIdentifier, sdkVersion: sdkVersion,
+                appliedState: event.newState, purposeApplied: event.purpose,
+                nativeMethodCall: "RecordingSDK.apply", success: true, status: .applied
+            )
+        }
+    }
+
+    func testLateRegisteringAdapterIsSyncedToExistingConsent() async throws {
+        // ConsentBus.shared is a process-wide singleton, so scope this test
+        // to a purpose no other test touches to avoid FSM-state collisions.
+        let purpose = ConsentPurpose.guardianMediated
+        _ = try await ConsentBus.shared.setConsent(.revoked, purpose: purpose, source: .userUI)
+
+        let lateAdapter = RecordingAdapter()
+        try await ConsentBus.shared.register(adapter: lateAdapter)
+
+        let received = await lateAdapter.receivedEvents
+        XCTAssertEqual(received.count, 1)
+        XCTAssertEqual(received.first?.newState, .revoked)
+        XCTAssertEqual(received.first?.purpose, purpose)
+        XCTAssertEqual(received.first?.sourceSignal, .adapterSync)
     }
 }

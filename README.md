@@ -20,29 +20,39 @@ This creates:
 ConsentBus is a lightweight Swift package that sits between your app's consent UI and your third-party SDKs:
 
 - **Atomic dispatch** — a single serialized broker propagates consent to every registered SDK adapter in one execution pass, eliminating partial-propagation race conditions
-- **Cryptographic receipts** — every SDK adapter returns a structured, signed receipt confirming exactly what was applied, when, and via which native API call
-- **Hash-chained audit ledger** — every consent event is committed to a tamper-evident HMAC-SHA256 chain, producing a verifiable compliance record
+- **Cryptographic receipts** — every SDK adapter returns a structured receipt confirming exactly what was applied, when, and via which native API call
+- **Hash-chained, persisted audit ledger** — every consent event is committed to a tamper-evident HMAC-SHA256 chain, with the key in the Keychain and entries on disk, so the record survives app relaunch instead of living only in memory
 - **Capability-aware dispatch** — each adapter declares which consent purposes it supports; ConsentBus distinguishes `NOT_SUPPORTED` from `FAILED`, giving you a precise `ComplianceCoverageScore`
-- **Exportable compliance reports** — generate a signed, machine-readable attestation artifact for your DPO or regulatory audit, without needing device access
+- **Digitally signed compliance reports** — every `ComplianceAttestationReport` carries an Ed25519 signature your DPO or a regulator can verify with only the public key (`ConsentBus.shared.compliancePublicKey`) — never your device's private signing key
+- **Late-joining adapters get synced automatically** — an SDK registered after a consent decision was already made (common for lazily-initialized SDKs) is replayed the existing per-purpose state before `register(adapter:)` returns, instead of silently running under its own default
 
 ## Quick Start
 
 ```swift
 import ConsentBus
 
-// Register adapters at app launch
-await ConsentBus.shared.register(adapter: FirebaseConsentAdapterExample())
-await ConsentBus.shared.register(adapter: MetaAudienceNetworkAdapter())
-await ConsentBus.shared.register(adapter: AppsFlyerAdapter())
+// Register adapters at app launch. Adapters registered later (e.g. a
+// lazily-initialized SDK) are automatically synced to whatever consent
+// state was already established, so they never run on stale defaults.
+try await ConsentBus.shared.register(adapter: FirebaseConsentAdapterExample())
+try await ConsentBus.shared.register(adapter: MetaAudienceNetworkAdapter())
+try await ConsentBus.shared.register(adapter: AppsFlyerAdapter())
 
 // Propagate a consent change atomically to all registered SDKs
 let entry = try await ConsentBus.shared.setConsent(.revoked, purpose: .adPersonalization, source: .userUI)
 
-// Export a compliance report
+// Export a signed compliance report
 let report = await ConsentBus.shared.exportComplianceReport()
 
 // Verify the tamper-evident audit chain
 let isValid = await ConsentBus.shared.verifyAuditChainIntegrity()
+
+// Independently verify a report's signature — an auditor only needs the
+// report and this public key, never anything from the device itself
+if let report {
+    let publicKey = ConsentBus.shared.compliancePublicKey
+    let signatureIsValid = ComplianceAttestationEngine.verify(report, publicKey: publicKey)
+}
 ```
 
 Running the bundled demo target (`swift run ConsentBusDemo`) produces output like this:
@@ -156,11 +166,14 @@ All adapters other than Firebase's are currently **stubs** — they compile and 
       "status" : "NOT_SUPPORTED",
       "nativeMethodCall" : "N/A"
     }
-  ]
+  ],
+  "signature" : "1jNwLFrFPEbbyJEpAIlZ33jXJSjwHrSWikxr9/UDE4mTOtUl1A716RY1HPHpFpnlysafvYsP7YTZsE5YfjAgBA=="
 }
 ```
 
 `coverageScore` excludes `NOT_SUPPORTED` entries from the denominator entirely — Mixpanel doesn't declare `adPersonalization` in its capability schema, so it isn't penalized as a compliance failure the way AppsFlyer's genuine `FAILED` receipt is.
+
+`signature` is an Ed25519 signature over every other field, computed with a private key that never leaves the device's Keychain. Verify it with `ComplianceAttestationEngine.verify(report, publicKey:)` and the public key from `ConsentBus.shared.compliancePublicKey` — an auditor needs only the report and that public key, never anything secret from the device.
 
 ## Status
 

@@ -130,9 +130,9 @@ let alwaysSucceeds = AlwaysSucceedsAdapter()
 let alwaysFails = AlwaysFailsAdapter()
 let partialSupport = PartialSupportAdapter()
 
-await ConsentBus.shared.register(adapter: alwaysSucceeds)
-await ConsentBus.shared.register(adapter: alwaysFails)
-await ConsentBus.shared.register(adapter: partialSupport)
+try await ConsentBus.shared.register(adapter: alwaysSucceeds)
+try await ConsentBus.shared.register(adapter: alwaysFails)
+try await ConsentBus.shared.register(adapter: partialSupport)
 
 print("  Registered: \(alwaysSucceeds.sdkIdentifier)  — always applies consent successfully")
 print("  Registered: \(alwaysFails.sdkIdentifier)     — always fails to apply consent")

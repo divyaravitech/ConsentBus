@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// The central consent broker: a process-resident singleton that dispatches
 /// consent events to all registered SDK adapters within a single serialized
@@ -14,18 +15,85 @@ public actor ConsentBus {
 
     private var adapters: [any ConsentAdapter] = []
     private var fsmByPurpose: [ConsentPurpose: ConsentFSM] = [:]
-    private let ledger = AuditLedger()
-    public lazy var attestationEngine = ComplianceAttestationEngine(ledger: ledger)
+    private let ledger: AuditLedger
+    public let attestationEngine: ComplianceAttestationEngine
+
+    /// The public key auditors need to independently verify signed
+    /// compliance reports (`ComplianceAttestationEngine.verify(_:publicKey:)`).
+    /// Distribute this to your DPO/regulator; never distribute the private
+    /// signing key it pairs with.
+    public nonisolated var compliancePublicKey: Curve25519.Signing.PublicKey {
+        attestationEngine.publicKey
+    }
 
     private let maxRetries = 3
     private let baseRetryDelayNanoseconds: UInt64 = 1_000_000_000 // 1s
 
-    private init() {}
+    /// Keychain identity for the signing key `ConsentBus.shared` uses by
+    /// default. Centralized (rather than inlined in `init()`) so nothing
+    /// else — including tests that need to clean up the real Keychain
+    /// artifacts this singleton creates on first access — has to duplicate
+    /// these strings and risk them drifting apart.
+    static let signingKeyKeychainService = AuditLedgerPersistence.default.keychainService
+    static let signingKeyKeychainAccount = "ed25519-signing-key"
+
+    private init() {
+        let ledger: AuditLedger
+        if let persistent = try? AuditLedger(persistence: .default) {
+            ledger = persistent
+        } else {
+            Self.logPersistenceFallback("audit ledger (Keychain/disk unavailable — falling back to in-memory; the audit trail will NOT survive relaunch)")
+            ledger = AuditLedger()
+        }
+        self.ledger = ledger
+
+        let signingKeyStore = KeychainKeyStore(
+            service: Self.signingKeyKeychainService,
+            account: Self.signingKeyKeychainAccount
+        )
+        let signingKey: Curve25519.Signing.PrivateKey
+        if let keyData = try? signingKeyStore.loadOrCreate(generator: {
+            Curve25519.Signing.PrivateKey().rawRepresentation
+        }), let restored = try? Curve25519.Signing.PrivateKey(rawRepresentation: keyData) {
+            signingKey = restored
+        } else {
+            Self.logPersistenceFallback("compliance signing key (Keychain unavailable — falling back to an ephemeral key; reports signed this session won't verify against a key fetched next launch)")
+            signingKey = Curve25519.Signing.PrivateKey()
+        }
+
+        self.attestationEngine = ComplianceAttestationEngine(ledger: ledger, signingKey: signingKey)
+    }
+
+    private static func logPersistenceFallback(_ message: String) {
+        FileHandle.standardError.write(Data("ConsentBus: \(message)\n".utf8))
+        assertionFailure("ConsentBus persistence fallback: \(message)")
+    }
 
     /// Register an SDK adapter. Adapters should be registered at app launch
-    /// before any consent events are dispatched.
-    public func register(adapter: any ConsentAdapter) {
+    /// before any consent events are dispatched — but if one registers
+    /// later (common for lazily-initialized SDKs), it is synced to every
+    /// already-established per-purpose consent decision before this call
+    /// returns, so it never silently runs under its own default assumption
+    /// while every other adapter already reflects the user's actual choice.
+    public func register(adapter: any ConsentAdapter) async throws {
         adapters.append(adapter)
+
+        for (purpose, fsm) in fsmByPurpose where fsm.currentState != .unknown {
+            let event = ConsentEvent(
+                previousState: fsm.currentState,
+                newState: fsm.currentState,
+                purpose: purpose,
+                version: await ledger.currentVersion() + 1,
+                sourceSignal: .adapterSync
+            )
+            let receipt = await dispatchWithRetry(adapter: adapter, event: event)
+            try await ledger.commit(
+                purpose: purpose,
+                appliedState: fsm.currentState,
+                sourceSignal: .adapterSync,
+                receipts: [receipt]
+            )
+        }
     }
 
     /// Core patented operation: validate the requested transition, then
@@ -68,9 +136,7 @@ public actor ConsentBus {
 
     /// Dispatch to a single adapter with exponential backoff retry on failure.
     ///
-    /// Patent reference: Claim 4 — retry mechanism with exponential backoff,
-    /// recording each retry as a subsequent ledger entry referencing the
-    /// original event version.
+    /// Patent reference: Claim 4 — retry mechanism with exponential backoff.
     func dispatchWithRetry(
         adapter: any ConsentAdapter,
         event: ConsentEvent

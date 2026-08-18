@@ -36,6 +36,12 @@ public enum ConsentSource: String, Codable, Sendable {
     case osSignal
     case api
     case guardianAccount
+    /// A previously-established consent decision replayed to an adapter
+    /// that registered after the decision was originally made — distinct
+    /// from `.api` so the audit trail can tell "the user changed their
+    /// mind" apart from "a late-joining SDK was synced to the existing
+    /// decision."
+    case adapterSync
 }
 
 /// Finite-state machine enforcing valid consent state transitions.
@@ -45,6 +51,12 @@ public enum ConsentSource: String, Codable, Sendable {
 public struct ConsentFSM {
     private var current: ConsentState = .unknown
 
+    // Every state implicitly allows a self-transition (idempotent
+    // re-assertion of the current state) in addition to the listed
+    // forward transitions. Real callers routinely need this — e.g.
+    // re-broadcasting "still revoked" on app launch, or ConsentBus.register
+    // replaying an existing decision to a newly-joined adapter — and it
+    // would be wrong for those to be treated as FSM violations.
     private let validTransitions: [ConsentState: Set<ConsentState>] = [
         .unknown: [.pending, .granted, .revoked],
         .pending: [.granted, .revoked],
@@ -59,7 +71,7 @@ public struct ConsentFSM {
 
     @discardableResult
     public mutating func transition(to next: ConsentState) throws -> ConsentState {
-        guard validTransitions[current]?.contains(next) == true else {
+        guard next == current || validTransitions[current]?.contains(next) == true else {
             throw ConsentError.invalidTransition(from: current, to: next)
         }
         current = next

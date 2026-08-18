@@ -27,9 +27,31 @@ public actor AuditLedger {
     private var lastHash: String = "GENESIS"
     private var entries: [LedgerEntry] = []
     private let hmacKey: SymmetricKey
+    private let entryStore: AuditLedgerEntryFileStore?
 
-    public init(hmacKey: SymmetricKey = SymmetricKey(size: .bits256)) {
-        self.hmacKey = hmacKey
+    /// Creates a transient, in-memory-only ledger: a fresh random HMAC key,
+    /// no persistence. Entries are lost when this instance deallocates.
+    /// Suitable for tests and short-lived usage — not for production
+    /// compliance evidence, which needs `init(persistence:)`.
+    public init() {
+        self.hmacKey = SymmetricKey(size: .bits256)
+        self.entryStore = nil
+    }
+
+    /// Creates a ledger whose HMAC key is stored in the Keychain and whose
+    /// committed entries are persisted to disk, so the audit trail survives
+    /// app relaunch. This is what `ConsentBus.shared` uses.
+    public init(persistence: AuditLedgerPersistence) throws {
+        let keyStore = KeychainKeyStore(service: persistence.keychainService, account: persistence.keychainAccount)
+        let keyData = try keyStore.loadOrCreate { Data(SymmetricKey(size: .bits256).withUnsafeBytes { Array($0) }) }
+        self.hmacKey = SymmetricKey(data: keyData)
+
+        let entryStore = AuditLedgerEntryFileStore(fileURL: persistence.entriesFileURL)
+        self.entryStore = entryStore
+        let loaded = try entryStore.load()
+        self.entries = loaded
+        self.version = loaded.last?.version ?? 0
+        self.lastHash = loaded.last?.currentHash ?? "GENESIS"
     }
 
     /// Commit a new ledger entry, computing its hash from the previous
@@ -63,6 +85,15 @@ public actor AuditLedger {
 
         entries.append(entry)
         lastHash = currentHash
+
+        // Persist if configured. Note: the consent change has already been
+        // dispatched to adapters by the time commit() is called, so a write
+        // failure here can't roll that back — it surfaces as a thrown error
+        // so the caller can detect/retry a durability gap, not to prevent
+        // the (already-happened) consent change from being recorded
+        // in-memory for this process's lifetime.
+        try entryStore?.save(entries)
+
         return entry
     }
 
