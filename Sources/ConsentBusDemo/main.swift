@@ -124,6 +124,28 @@ collects a structured receipt from each, and produces a tamper-evident,
 cryptographically verifiable audit trail.
 """)
 
+section("⚠ This demo writes to your REAL Keychain and disk")
+
+print("""
+
+ConsentBus.shared is the real production singleton, not a sandboxed demo
+instance — so the moment this demo touches it below, it persists a real
+HMAC key and an Ed25519 signing key to your login Keychain, and writes a
+real ledger file to disk. Specifically:
+
+  Keychain service : \(AuditLedgerPersistence.default.keychainService)
+  Ledger file      : \(AuditLedgerPersistence.default.entriesFileURL.path)
+
+This is intentional — it's what proves persistence actually survives a
+relaunch (run this demo twice and watch consentVersion/chainProof keep
+growing in Step 4). But it means running this demo leaves real artifacts
+on your machine. To remove them afterward:
+
+  rm -rf "\(AuditLedgerPersistence.default.entriesFileURL.deletingLastPathComponent().path)"
+  security delete-generic-password -s "\(AuditLedgerPersistence.default.keychainService)" -a "hmac-key"
+  security delete-generic-password -s "\(AuditLedgerPersistence.default.keychainService)" -a "ed25519-signing-key"
+""")
+
 section("Step 1 — Registering SDK Adapters")
 
 let alwaysSucceeds = AlwaysSucceedsAdapter()
