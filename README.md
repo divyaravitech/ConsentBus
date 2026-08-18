@@ -10,6 +10,7 @@ with Cryptographic Audit for Mobile Applications](https://doi.org/10.2139/ssrn.7
 
 [![Swift](https://img.shields.io/badge/Swift-5.9-orange.svg)](https://swift.org)
 [![Platform](https://img.shields.io/badge/platform-iOS%2016%2B-blue.svg)](https://developer.apple.com)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Patent Pending](https://img.shields.io/badge/Patent-Pending-yellow.svg)](#patent-status)
 
 ## The Problem
@@ -196,12 +197,12 @@ This is an early-stage reference implementation accompanying a filed patent appl
 
 ## Patent Status
 
-This project's core architecture — atomic SDK consent dispatch, receipt-chained audit ledger, capability negotiation protocol, and compliance attestation engine — is described in a filed U.S. provisional patent application (Application No. 64/087,949, filed June 11, 2026). The code in this repository is provided under the MIT license below; the patent covers the underlying method and system.
+This project's core architecture — atomic SDK consent dispatch, receipt-chained audit ledger, capability negotiation protocol, and compliance attestation engine — is described in a filed U.S. provisional patent application (Application No. 64/087,949, filed June 11, 2026). The code is licensed under Apache License 2.0, which includes an explicit patent grant (Section 3): using, modifying, and distributing this codebase is licensed under the applicable patent claims, not just copyright. See [LICENSE](LICENSE) for the exact scope, and its closing note for a plain-language summary of what that grant does and doesn't cover.
 
 ## Contributing
 
-Adapters should implement the `ConsentAdapter` protocol in `Sources/ConsentBus/Adapters/ConsentAdapter.swift`. See `FirebaseConsentAdapterExample.swift` for the expected pattern. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full step-by-step guide. PRs welcome.
+Adapters should implement the `ConsentAdapter` protocol in `Sources/ConsentBus/Adapters/ConsentAdapter.swift`. See `FirebaseConsentAdapterExample.swift` for the expected pattern. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full step-by-step guide, including how the patent/license interact for contributors. PRs welcome.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Apache License 2.0 — see [LICENSE](LICENSE).

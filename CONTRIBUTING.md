@@ -7,7 +7,7 @@ Thanks for considering a contribution. The most common contribution is a new SDK
 This project's core architecture is described in a filed U.S. provisional patent application (No. 64/087,949 — see the [Patent Status](README.md#patent-status) section of the README). We want that disclosed clearly *before* you write any code, not buried afterward, since it's a reasonable thing to want to know before contributing to a codebase whose owner holds a pending patent on the same functionality.
 
 Practically, for a typical contribution (a new SDK adapter, a bug fix, a test):
-- Your contribution is licensed under this repository's [LICENSE](LICENSE), same as the rest of the code.
+- Your contribution is licensed under this repository's [LICENSE](LICENSE) (Apache License 2.0), same as the rest of the code — Section 5 of that license means it's submitted under the same terms automatically, including the same patent grant (Section 3), unless you explicitly state otherwise when you submit it.
 - The patent covers the underlying *method* described in the application, not any specific line of adapter code — implementing `ConsentAdapter` for a new vendor SDK doesn't require you to have any interest in, or grant anything regarding, the patent itself.
 
 There is currently no separate, formal Contributor License Agreement (CLA) beyond what's implied by contributing under the repo's LICENSE. If that changes, it'll be announced here and in the relevant PR template — not retroactively applied to contributions already made.
