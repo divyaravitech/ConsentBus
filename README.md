@@ -80,7 +80,7 @@ Step 3 — Revoking adPersonalization
                    ⚠ Purpose adPersonalization not in declared schema
 
 ────────────────────────────────────────────────────────────────────────
-Step 5 — Verifying Tamper-Evident Chain Integrity
+Step 6 — Verifying Tamper-Evident Chain Integrity
 ────────────────────────────────────────────────────────────────────────
   VALID — every ledger entry's HMAC-SHA256 hash correctly chains to the
   one before it, and each entry's hash matches a fresh recomputation
@@ -154,6 +154,7 @@ All adapters other than Firebase's are currently **stubs** — they compile and 
     "7f75d2d29286602e7b1e4742c553d45e57d1dddc9acbbf030014c7b2d6fb0ae3",
     "e0493ca6071541c92f352309ea7f412a77a4a5fc318bdad17eac1b66407882a1"
   ],
+  "consentChangedAt" : "2026-07-07T16:23:50Z",
   "consentVersion" : 2,
   "coverageScore" : 50,
   "generatedAt" : "2026-07-07T16:23:51Z",
@@ -182,6 +183,8 @@ All adapters other than Firebase's are currently **stubs** — they compile and 
 ```
 
 `coverageScore` excludes `NOT_SUPPORTED` entries from the denominator entirely — Mixpanel doesn't declare `adPersonalization` in its capability schema, so it isn't penalized as a compliance failure the way AppsFlyer's genuine `FAILED` receipt is.
+
+`consentChangedAt` is when the consent change actually happened; `generatedAt` is when this report artifact was exported, which can be considerably later if a report is requested for audit purposes well after the fact.
 
 `signature` is an Ed25519 signature over every other field, computed with a private key that never leaves the device's Keychain. Verify it with `ComplianceAttestationEngine.verify(report, publicKey:)` and the public key from `ConsentBus.shared.compliancePublicKey` — an auditor needs only the report and that public key, never anything secret from the device.
 

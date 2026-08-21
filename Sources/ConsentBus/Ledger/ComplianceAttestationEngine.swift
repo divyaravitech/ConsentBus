@@ -7,6 +7,13 @@ public struct PropagationStatusEntry: Codable, Sendable {
     public let sdkVersion: String
     public let status: PropagationStatus
     public let nativeMethodCall: String
+
+    public init(sdkIdentifier: String, sdkVersion: String, status: PropagationStatus, nativeMethodCall: String) {
+        self.sdkIdentifier = sdkIdentifier
+        self.sdkVersion = sdkVersion
+        self.status = status
+        self.nativeMethodCall = nativeMethodCall
+    }
 }
 
 /// The fields a ComplianceAttestationReport's signature is computed over.
@@ -14,6 +21,7 @@ public struct PropagationStatusEntry: Codable, Sendable {
 /// can't include a signature over its own not-yet-computed signature field.
 private struct UnsignedReportPayload: Codable {
     let consentVersion: UInt64
+    let consentChangedAt: Date
     let generatedAt: Date
     let propagationTable: [PropagationStatusEntry]
     let coverageScore: Double
@@ -27,6 +35,11 @@ private struct UnsignedReportPayload: Codable {
 /// ComplianceCoverageScore, ChainProof, and digital signature.
 public struct ComplianceAttestationReport: Codable, Sendable {
     public let consentVersion: UInt64
+    /// When the underlying consent change this report describes actually
+    /// happened — distinct from `generatedAt`, which is when this report
+    /// artifact was exported and may be considerably later (a report can
+    /// be requested for audit purposes well after the fact).
+    public let consentChangedAt: Date
     public let generatedAt: Date
     public let propagationTable: [PropagationStatusEntry]
     public let coverageScore: Double
@@ -38,6 +51,24 @@ public struct ComplianceAttestationReport: Codable, Sendable {
     /// `ConsentBus.shared.compliancePublicKey`, never the device's secret
     /// signing key.
     public let signature: String
+
+    public init(
+        consentVersion: UInt64,
+        consentChangedAt: Date,
+        generatedAt: Date,
+        propagationTable: [PropagationStatusEntry],
+        coverageScore: Double,
+        chainProof: [String],
+        signature: String
+    ) {
+        self.consentVersion = consentVersion
+        self.consentChangedAt = consentChangedAt
+        self.generatedAt = generatedAt
+        self.propagationTable = propagationTable
+        self.coverageScore = coverageScore
+        self.chainProof = chainProof
+        self.signature = signature
+    }
 }
 
 /// Generates and independently verifies signed ComplianceAttestationReport
@@ -79,17 +110,25 @@ public actor ComplianceAttestationEngine {
 
         let payload = UnsignedReportPayload(
             consentVersion: latest.version,
+            consentChangedAt: latest.timestamp,
             generatedAt: Date(),
             propagationTable: table,
             coverageScore: Self.computeCoverageScore(receipts: latest.receipts),
             chainProof: entries.map { $0.currentHash }
         )
 
-        let signature = (try? signingKey.signature(for: Self.canonicalPayloadData(payload)))
-            ?? Data()
+        // If signing genuinely fails, do NOT ship a report with a blank/
+        // broken signature that merely *looks* trustworthy — a report
+        // whose entire value proposition is its signature is worse than
+        // no report at all if that signature is silently fake. Treat it
+        // the same as "nothing to report."
+        guard let signature = try? signingKey.signature(for: Self.canonicalPayloadData(payload)) else {
+            return nil
+        }
 
         return ComplianceAttestationReport(
             consentVersion: payload.consentVersion,
+            consentChangedAt: payload.consentChangedAt,
             generatedAt: payload.generatedAt,
             propagationTable: payload.propagationTable,
             coverageScore: payload.coverageScore,
@@ -106,6 +145,7 @@ public actor ComplianceAttestationEngine {
         guard let signatureData = Data(base64Encoded: report.signature) else { return false }
         let payload = UnsignedReportPayload(
             consentVersion: report.consentVersion,
+            consentChangedAt: report.consentChangedAt,
             generatedAt: report.generatedAt,
             propagationTable: report.propagationTable,
             coverageScore: report.coverageScore,

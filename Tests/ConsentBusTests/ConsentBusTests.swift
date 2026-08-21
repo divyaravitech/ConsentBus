@@ -330,6 +330,7 @@ final class ComplianceReportSigningTests: XCTestCase {
 
         let tampered = ComplianceAttestationReport(
             consentVersion: report.consentVersion,
+            consentChangedAt: report.consentChangedAt,
             generatedAt: report.generatedAt,
             propagationTable: report.propagationTable,
             coverageScore: 100.0, // tampered: claim full coverage instead of 50%
@@ -425,6 +426,46 @@ final class AdapterReplayOnRegisterTests: XCTestCase {
             XCTAssertEqual(sdkIdentifier, "test.duplicate.adapter")
         }
     }
+
+    /// A sequential duplicate check alone doesn't prove the guard is
+    /// race-free — the actual bug this guards against only shows up under
+    /// real concurrent registration, since `await adapter.sdkIdentifier`
+    /// inside the old check was a genuine suspension point two reentrant
+    /// register() calls could interleave across. Fire many concurrent
+    /// registrations of adapters that all share one sdkIdentifier and
+    /// verify exactly one succeeds.
+    func testConcurrentDuplicateRegistrationOnlyOneSucceeds() async throws {
+        actor ConcurrentDuplicateAdapter: ConsentAdapter {
+            let sdkIdentifier = "test.concurrent.duplicate.adapter"
+            let sdkVersion = "1.0.0"
+            let capabilitySchema = ConsentCapabilitySchema(
+                sdkIdentifier: "test.concurrent.duplicate.adapter",
+                supportedPurposes: [.functional]
+            )
+            func apply(_ event: ConsentEvent) async -> AdapterReceipt {
+                AdapterReceipt(
+                    sdkIdentifier: sdkIdentifier, sdkVersion: sdkVersion,
+                    appliedState: event.newState, purposeApplied: event.purpose,
+                    nativeMethodCall: "N/A", success: true, status: .applied
+                )
+            }
+        }
+
+        let successCount = await withTaskGroup(of: Bool.self) { group in
+            for _ in 0..<20 {
+                group.addTask {
+                    (try? await ConsentBus.shared.register(adapter: ConcurrentDuplicateAdapter())) != nil
+                }
+            }
+            var successes = 0
+            for await succeeded in group where succeeded {
+                successes += 1
+            }
+            return successes
+        }
+
+        XCTAssertEqual(successCount, 1, "exactly one of 20 concurrent registrations sharing an sdkIdentifier should succeed")
+    }
 }
 
 final class AdapterTimeoutTests: XCTestCase {
@@ -436,12 +477,25 @@ final class AdapterTimeoutTests: XCTestCase {
             supportedPurposes: [.analyticsStorage]
         )
 
-        // Never returns on its own — simulates a real hung network call
-        // with no timeout of its own. Sleeps far longer than ConsentBus's
-        // own adapter timeout, so it's genuinely ConsentBus's timeout that
-        // produces a result here, not this sleep ending naturally.
+        // Blocks the underlying thread with Thread.sleep rather than
+        // Task.sleep deliberately: Task.sleep is cancellation-aware and
+        // would pass this test even against a *broken* timeout
+        // implementation, giving false confidence — exactly the trap an
+        // earlier version of this test fell into. A real vendor SDK's
+        // blocking network call won't check Task.isCancelled either, so
+        // this is the more faithful (if uglier) simulation. Sleeps far
+        // longer than ConsentBus's own adapter timeout, so it's genuinely
+        // that timeout producing a result here, not this sleep ending.
+        // Thread.sleep is marked noasync (a warning today, a hard error
+        // under Swift 6 language mode) if called directly from an async
+        // function — routing it through this plain synchronous function
+        // avoids that while keeping the actual blocking behavior identical.
+        nonisolated func blockThreadSynchronously(seconds: TimeInterval) {
+            Thread.sleep(forTimeInterval: seconds)
+        }
+
         func apply(_ event: ConsentEvent) async -> AdapterReceipt {
-            try? await Task.sleep(nanoseconds: 3_600_000_000_000) // 1 hour
+            blockThreadSynchronously(seconds: 3600) // 1 hour, non-cancellable
             return AdapterReceipt(
                 sdkIdentifier: sdkIdentifier, sdkVersion: sdkVersion,
                 appliedState: event.newState, purposeApplied: event.purpose,

@@ -15,6 +15,26 @@ public struct LedgerEntry: Codable, Sendable {
     public let receipts: [AdapterReceipt]
     public let previousHash: String
     public let currentHash: String
+
+    public init(
+        version: UInt64,
+        timestamp: Date,
+        purpose: ConsentPurpose,
+        appliedState: ConsentState,
+        sourceSignal: ConsentSource,
+        receipts: [AdapterReceipt],
+        previousHash: String,
+        currentHash: String
+    ) {
+        self.version = version
+        self.timestamp = timestamp
+        self.purpose = purpose
+        self.appliedState = appliedState
+        self.sourceSignal = sourceSignal
+        self.receipts = receipts
+        self.previousHash = previousHash
+        self.currentHash = currentHash
+    }
 }
 
 /// Tamper-evident, hash-chained audit ledger.

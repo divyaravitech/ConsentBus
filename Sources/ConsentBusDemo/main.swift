@@ -1,4 +1,5 @@
 import ConsentBus
+import CryptoKit
 import Foundation
 
 // MARK: - Mock SDK adapters demonstrating the three propagation outcomes
@@ -190,7 +191,8 @@ do {
 
 section("Step 4 — Compliance Attestation Report")
 
-if let report = await ConsentBus.shared.exportComplianceReport() {
+let report = await ConsentBus.shared.exportComplianceReport()
+if let report {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     encoder.dateEncodingStrategy = .iso8601
@@ -200,7 +202,46 @@ if let report = await ConsentBus.shared.exportComplianceReport() {
     print("  No report available.")
 }
 
-section("Step 5 — Verifying Tamper-Evident Chain Integrity")
+section("Step 5 — Independently Verifying the Report's Signature")
+
+print("""
+
+The report above carries an Ed25519 signature. An auditor never needs
+anything from this device to check it — only the report itself and this
+public key:
+
+  \(ConsentBus.shared.compliancePublicKey.rawRepresentation.base64EncodedString())
+""")
+
+if let report {
+    let isSignatureValid = ComplianceAttestationEngine.verify(report, publicKey: ConsentBus.shared.compliancePublicKey)
+    print(isSignatureValid
+        ? "\n  ✅ Signature VALID — this report was genuinely produced by this device's key,\n     and hasn't been altered since."
+        : "\n  ❌ Signature INVALID.")
+
+    // Prove the signature actually protects the content, not just present:
+    // tamper with the exported JSON exactly the way a real attacker would
+    // (an auditor only ever sees the JSON artifact, never a live Swift
+    // struct) and show the same verification call now correctly rejects it.
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    if let originalData = try? encoder.encode(report),
+       var json = try? JSONSerialization.jsonObject(with: originalData) as? [String: Any] {
+        json["coverageScore"] = 100.0 // tampered: silently claim full coverage
+        if let tamperedData = try? JSONSerialization.data(withJSONObject: json) {
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            if let tampered = try? decoder.decode(ComplianceAttestationReport.self, from: tamperedData) {
+                let tamperedIsValid = ComplianceAttestationEngine.verify(tampered, publicKey: ConsentBus.shared.compliancePublicKey)
+                print(tamperedIsValid
+                    ? "  ❌ A tampered copy of the JSON (coverageScore silently changed to 100) still verified — this should never happen."
+                    : "  ✅ A tampered copy of the JSON (coverageScore silently changed to 100) correctly FAILS verification.")
+            }
+        }
+    }
+}
+
+section("Step 6 — Verifying Tamper-Evident Chain Integrity")
 
 let isValid = await ConsentBus.shared.verifyAuditChainIntegrity()
 if isValid {

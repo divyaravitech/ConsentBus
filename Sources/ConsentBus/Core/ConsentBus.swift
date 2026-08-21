@@ -21,6 +21,15 @@ public actor ConsentBus {
     public static let shared = ConsentBus()
 
     private var adapters: [any ConsentAdapter] = []
+    /// Tracks `adapters`' identifiers synchronously, alongside `adapters`
+    /// itself, so `register(adapter:)` can check-and-insert with no
+    /// suspension point in between. An earlier version checked for
+    /// duplicates via `await existing.sdkIdentifier` on each already-
+    /// registered adapter — a genuine suspension point, meaning two
+    /// concurrent `register` calls for adapters sharing an sdkIdentifier
+    /// could both pass the check (reading the same not-yet-updated state)
+    /// before either finished appending, defeating the guard entirely.
+    private var registeredIdentifiers: Set<String> = []
     private var fsmByPurpose: [ConsentPurpose: ConsentFSM] = [:]
     private let ledger: AuditLedger
     private let attestationEngine: ComplianceAttestationEngine
@@ -126,9 +135,14 @@ public actor ConsentBus {
     /// double-dispatching every future consent change to it.
     public func register(adapter: any ConsentAdapter) async throws {
         let newIdentifier = await adapter.sdkIdentifier
-        for existing in adapters where await existing.sdkIdentifier == newIdentifier {
+
+        // Check-and-insert with no `await` in between: this is what
+        // actually makes it race-free against a reentrant concurrent
+        // register() call, not just the fact that a check happens at all.
+        guard !registeredIdentifiers.contains(newIdentifier) else {
             throw ConsentBusError.duplicateAdapter(sdkIdentifier: newIdentifier)
         }
+        registeredIdentifiers.insert(newIdentifier)
         adapters.append(adapter)
 
         for (purpose, fsm) in fsmByPurpose where fsm.currentState != .unknown {
@@ -233,13 +247,27 @@ public actor ConsentBus {
     }
 
     /// Races a single `apply(_:)` call against a fixed timeout so one
-    /// hung adapter (e.g. a real network call with no timeout of its own)
-    /// can't wedge dispatch — or, since ConsentBus is a global-actor
-    /// singleton every consent operation funnels through, the entire app's
-    /// consent handling — forever. Cancellation of the losing branch is
-    /// cooperative: an adapter that never checks `Task.isCancelled` keeps
-    /// running in the background after this returns a synthetic timeout
-    /// receipt, it just no longer blocks the caller.
+    /// hung adapter (e.g. a real, blocking network call in a vendor SDK
+    /// with no timeout of its own) can't wedge dispatch — or, since
+    /// ConsentBus is a global-actor singleton every consent operation
+    /// funnels through, the entire app's consent handling — forever.
+    ///
+    /// This deliberately does NOT use `withTaskGroup`/`async let`: those
+    /// structured-concurrency primitives guarantee a scope can't exit
+    /// while it still has un-awaited *structured* children, which means
+    /// losing the race still blocks this function until the slow call
+    /// actually finishes on its own — verified empirically, this made an
+    /// earlier version of this function take the full duration of a
+    /// non-cancellation-aware blocking call instead of actually timing
+    /// out. `adapter.apply(event)` is run as a genuinely *unstructured*
+    /// `Task`, which is not bound to this function's scope, so this
+    /// function can return the moment the timeout fires without waiting
+    /// for it — the loser keeps running independently in the background
+    /// (cancelled as a courtesy, which only helps adapters that
+    /// cooperatively check `Task.isCancelled`; a truly blocking call, like
+    /// a raw synchronous network request, can't be force-terminated by
+    /// anything on the calling side — that's a fundamental limit of
+    /// Swift's cooperative concurrency model, not something fixable here).
     nonisolated func applyWithTimeout(
         adapter: any ConsentAdapter,
         event: ConsentEvent
@@ -248,32 +276,35 @@ public actor ConsentBus {
         let sdkVersion = await adapter.sdkVersion
         let timeoutNanoseconds = adapterTimeoutNanoseconds
 
-        return await withTaskGroup(of: AdapterReceipt?.self) { group in
-            group.addTask {
-                await adapter.apply(event)
+        let applyTask = Task<AdapterReceipt, Never> {
+            await adapter.apply(event)
+        }
+        let resumeGuard = ResumeOnceGuard()
+
+        return await withCheckedContinuation { (continuation: CheckedContinuation<AdapterReceipt, Never>) in
+            Task {
+                let receipt = await applyTask.value
+                if await resumeGuard.tryResume() {
+                    continuation.resume(returning: receipt)
+                }
             }
-            group.addTask {
+            Task {
                 try? await Task.sleep(nanoseconds: timeoutNanoseconds)
-                return nil
+                if await resumeGuard.tryResume() {
+                    applyTask.cancel()
+                    let seconds = Double(timeoutNanoseconds) / 1_000_000_000
+                    continuation.resume(returning: AdapterReceipt(
+                        sdkIdentifier: sdkIdentifier,
+                        sdkVersion: sdkVersion,
+                        appliedState: event.newState,
+                        purposeApplied: event.purpose,
+                        nativeMethodCall: "N/A",
+                        success: false,
+                        status: .failed,
+                        errorDescription: "Adapter did not respond within \(seconds)s (timed out)"
+                    ))
+                }
             }
-
-            let firstResult = await group.next() ?? nil
-            group.cancelAll()
-
-            if let receipt = firstResult {
-                return receipt
-            }
-            let seconds = Double(timeoutNanoseconds) / 1_000_000_000
-            return AdapterReceipt(
-                sdkIdentifier: sdkIdentifier,
-                sdkVersion: sdkVersion,
-                appliedState: event.newState,
-                purposeApplied: event.purpose,
-                nativeMethodCall: "N/A",
-                success: false,
-                status: .failed,
-                errorDescription: "Adapter did not respond within \(seconds)s (timed out)"
-            )
         }
     }
 
@@ -291,6 +322,21 @@ public actor ConsentBus {
     /// LedgerEntry has been altered since it was committed.
     public func verifyAuditChainIntegrity() async -> Bool {
         await ledger.verifyChainIntegrity()
+    }
+}
+
+/// Ensures a `CheckedContinuation` is resumed exactly once when two
+/// independent, unstructured tasks are racing to resume it — calling
+/// `resume` twice on the same continuation is a fatal runtime error, and
+/// with two genuinely concurrent tasks there's no other way to guarantee
+/// only one of them wins without a shared, isolated arbiter like this.
+private actor ResumeOnceGuard {
+    private var hasResumed = false
+
+    func tryResume() -> Bool {
+        guard !hasResumed else { return false }
+        hasResumed = true
+        return true
     }
 }
 

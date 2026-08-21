@@ -109,11 +109,14 @@ struct KeychainKeyStore {
         // unpredictable behavior across contexts (this was found the hard
         // way: it correlated with SecItemAdd failing under a bare XCTest
         // bundle on iOS Simulator, which lacks a host app's entitlements).
-        // afterFirstUnlock is the standard safe default for a key that
-        // doesn't need to be readable before the device is unlocked.
+        // ThisDeviceOnly matters here specifically: the ledger's entries
+        // live only on local disk and are never iCloud-synced, so letting
+        // this key sync via iCloud Keychain to another device (the
+        // non-ThisDeviceOnly variant's behavior) would be a semantic
+        // mismatch — a synced key with no corresponding synced data.
         let attributes: [String: Any] = [
             kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         ]
         let status = SecItemAdd(query.merging(attributes) { _, new in new } as CFDictionary, nil)
         guard status == errSecSuccess else {

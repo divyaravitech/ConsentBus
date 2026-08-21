@@ -15,7 +15,9 @@ All notable changes to ConsentBus are documented here. Format follows [Keep a Ch
 - CI: a genuine iOS Simulator test job, a latest-stable-Xcode job, and a Swift Package Index manifest-validation job, alongside the existing Xcode-15.4-minimum job.
 - `SECURITY.md`, and a patent/CLA disclosure section in `CONTRIBUTING.md`.
 - Meta Audience Network, AppsFlyer, Mixpanel, and Unity Ads adapters (stubs — see the adapter table in the README).
-- `ConsentBusDemo` executable target (`swift run ConsentBusDemo`).
+- `ConsentBusDemo` executable target (`swift run ConsentBusDemo`), including a signature-verification step that tampers with the exported JSON and shows verification correctly rejecting it.
+- `ComplianceAttestationReport.consentChangedAt` — when the underlying consent change actually happened, distinct from `generatedAt` (when the report was exported, which can be considerably later).
+- Public initializers for `LedgerEntry`, `ComplianceAttestationReport`, and `PropagationStatusEntry` — previously only constructible via `Codable` decoding or from inside the module, blocking third-party consumers (and the demo) from constructing synthetic values for their own tests.
 
 ### Changed
 - **Relicensed from MIT to Apache License 2.0.** The prior MIT license explicitly stated it granted no patent rights, which is a stronger blocker to org adoption than plain silence given the pending patent application; Apache 2.0's Section 3 grants an explicit patent license scoped to using/modifying/distributing this codebase.
@@ -30,6 +32,10 @@ All notable changes to ConsentBus are documented here. Format follows [Keep a Ch
 - Fixed `JSONEncoder` key-ordering non-determinism (via `.sortedKeys`) that could otherwise make the same content hash differently between commit time and a later integrity check, causing spurious tamper-detection failures on completely unmodified data.
 - The retry mechanism no longer retries `NOT_SUPPORTED` receipts — only genuine `FAILED` ones. Retrying a structural capability mismatch could never succeed and was adding multi-second delays for no reason.
 - Fixed a single global `ConsentFSM` being shared across all consent purposes, which made it impossible to independently revoke/grant two different purposes in sequence — the FSM is now scoped per purpose.
+- **Critical**: the per-adapter dispatch timeout didn't actually work against the failure mode it exists to protect against. It used `withTaskGroup`, whose implicit scope-exit drain waits for *all* child tasks to actually finish — not just be cancelled — before returning; a truly blocking call (e.g. a real vendor SDK's synchronous network request, which won't check `Task.isCancelled`) meant the "timeout" still blocked for the full duration of the hang. Verified empirically with a standalone diagnostic (5s blocking call vs. a 1s timeout took 5s, not 1s) before and after the fix. Rewritten using an unstructured `Task` raced via `withCheckedContinuation`, which can genuinely abandon the loser without waiting for it — verified the same diagnostic now returns in ~1s. The adapter-timeout test was also strengthened: it used `Task.sleep` (cancellation-aware), which would have passed against the broken implementation too, giving false confidence; it now uses a true thread-blocking call.
+- Fixed a TOCTOU race in `register(adapter:)`'s duplicate-`sdkIdentifier` guard: the check awaited each existing adapter's `sdkIdentifier`, a genuine suspension point a concurrent `register()` call could interleave across, defeating the guard entirely for adapters registered at nearly the same time. Fixed with a synchronously-maintained `Set<String>` checked and inserted with no intervening `await`. Verified with a 20-way concurrent registration stress test.
+- `ComplianceAttestationEngine.generateReport()` no longer silently ships a report with a blank/broken signature if signing itself fails — it returns `nil`, matching the existing "nothing to report" contract, rather than a report that merely looks trustworthy.
+- Keychain items now use `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` instead of the non-`ThisDeviceOnly` variant — the ledger's entries live only on local disk and are never iCloud-synced, so letting the key sync to another device was a semantic mismatch (a synced key with no corresponding synced data).
 
 ## [0.2.0] - 2026-08-18
 
