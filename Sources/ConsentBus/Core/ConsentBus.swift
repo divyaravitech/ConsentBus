@@ -26,6 +26,17 @@ public actor ConsentBus {
         attestationEngine.publicKey
     }
 
+    /// True if the audit ledger and/or compliance signing key could not be
+    /// loaded from persistent storage (Keychain and/or disk) at launch, and
+    /// this session is running on a transient, in-memory-only fallback
+    /// instead. This is a real, expected runtime condition — restricted
+    /// sandboxing, missing entitlements, a full disk — not a programmer
+    /// error, so ConsentBus never crashes because of it; check this flag
+    /// at launch if you want your own app to surface or log the
+    /// degradation rather than silently losing audit-trail durability for
+    /// the session.
+    public let isPersistenceDegraded: Bool
+
     private let maxRetries = 3
     private let baseRetryDelayNanoseconds: UInt64 = 1_000_000_000 // 1s
 
@@ -38,10 +49,13 @@ public actor ConsentBus {
     static let signingKeyKeychainAccount = "ed25519-signing-key"
 
     private init() {
+        var persistenceDegraded = false
+
         let ledger: AuditLedger
         if let persistent = try? AuditLedger(persistence: .default) {
             ledger = persistent
         } else {
+            persistenceDegraded = true
             Self.logPersistenceFallback("audit ledger (Keychain/disk unavailable — falling back to in-memory; the audit trail will NOT survive relaunch)")
             ledger = AuditLedger()
         }
@@ -57,16 +71,25 @@ public actor ConsentBus {
         }), let restored = try? Curve25519.Signing.PrivateKey(rawRepresentation: keyData) {
             signingKey = restored
         } else {
+            persistenceDegraded = true
             Self.logPersistenceFallback("compliance signing key (Keychain unavailable — falling back to an ephemeral key; reports signed this session won't verify against a key fetched next launch)")
             signingKey = Curve25519.Signing.PrivateKey()
         }
 
         self.attestationEngine = ComplianceAttestationEngine(ledger: ledger, signingKey: signingKey)
+        self.isPersistenceDegraded = persistenceDegraded
     }
 
+    /// Logs a persistence fallback without ever crashing the process.
+    ///
+    /// An earlier version of this used `assertionFailure`, which is fatal
+    /// in debug and test builds — verified empirically (running the test
+    /// suite on iOS Simulator, where the bare XCTest bundle lacks Keychain
+    /// entitlements a real provisioned app would have) that this took down
+    /// the entire host process the instant Keychain access failed. A
+    /// consent SDK must never crash its host app over a Keychain hiccup.
     private static func logPersistenceFallback(_ message: String) {
         FileHandle.standardError.write(Data("ConsentBus: \(message)\n".utf8))
-        assertionFailure("ConsentBus persistence fallback: \(message)")
     }
 
     /// Register an SDK adapter. Adapters should be registered at app launch

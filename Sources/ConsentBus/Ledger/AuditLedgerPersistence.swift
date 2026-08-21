@@ -105,7 +105,16 @@ struct KeychainKeyStore {
             kSecAttrService as String: service,
             kSecAttrAccount as String: account
         ]
-        let attributes: [String: Any] = [kSecValueData as String: data]
+        // Apple explicitly warns that omitting kSecAttrAccessible produces
+        // unpredictable behavior across contexts (this was found the hard
+        // way: it correlated with SecItemAdd failing under a bare XCTest
+        // bundle on iOS Simulator, which lacks a host app's entitlements).
+        // afterFirstUnlock is the standard safe default for a key that
+        // doesn't need to be readable before the device is unlocked.
+        let attributes: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
+        ]
         let status = SecItemAdd(query.merging(attributes) { _, new in new } as CFDictionary, nil)
         guard status == errSecSuccess else {
             throw PersistenceError.keychain(status)

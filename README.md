@@ -8,6 +8,7 @@ with Cryptographic Audit for Mobile Applications](https://doi.org/10.2139/ssrn.7
 
 **Atomic, cryptographically verifiable consent propagation across heterogeneous mobile SDKs.**
 
+[![CI](https://github.com/divyaravitech/ConsentBus/actions/workflows/ci.yml/badge.svg)](https://github.com/divyaravitech/ConsentBus/actions/workflows/ci.yml)
 [![Swift](https://img.shields.io/badge/Swift-5.9-orange.svg)](https://swift.org)
 [![Platform](https://img.shields.io/badge/platform-iOS%2016%2B-blue.svg)](https://developer.apple.com)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
