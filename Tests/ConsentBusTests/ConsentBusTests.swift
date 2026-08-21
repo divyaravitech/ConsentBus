@@ -192,6 +192,7 @@ final class RetryMechanismTests: XCTestCase {
 
         XCTAssertTrue(receipt.success)
         XCTAssertEqual(receipt.status, .applied)
+        XCTAssertEqual(receipt.attemptCount, 3, "should record it took 3 attempts to succeed")
         let finalCallCount = await adapter.callCount
         XCTAssertEqual(finalCallCount, 3)
     }
@@ -396,5 +397,79 @@ final class AdapterReplayOnRegisterTests: XCTestCase {
         XCTAssertEqual(received.first?.newState, .revoked)
         XCTAssertEqual(received.first?.purpose, purpose)
         XCTAssertEqual(received.first?.sourceSignal, .adapterSync)
+    }
+
+    func testDuplicateAdapterRegistrationThrows() async throws {
+        actor DuplicateIdentifierAdapter: ConsentAdapter {
+            let sdkIdentifier = "test.duplicate.adapter"
+            let sdkVersion = "1.0.0"
+            let capabilitySchema = ConsentCapabilitySchema(
+                sdkIdentifier: "test.duplicate.adapter",
+                supportedPurposes: [.measurement]
+            )
+            func apply(_ event: ConsentEvent) async -> AdapterReceipt {
+                AdapterReceipt(
+                    sdkIdentifier: sdkIdentifier, sdkVersion: sdkVersion,
+                    appliedState: event.newState, purposeApplied: event.purpose,
+                    nativeMethodCall: "N/A", success: true, status: .applied
+                )
+            }
+        }
+
+        try await ConsentBus.shared.register(adapter: DuplicateIdentifierAdapter())
+
+        do {
+            try await ConsentBus.shared.register(adapter: DuplicateIdentifierAdapter())
+            XCTFail("expected registering a second adapter with the same sdkIdentifier to throw")
+        } catch ConsentBusError.duplicateAdapter(let sdkIdentifier) {
+            XCTAssertEqual(sdkIdentifier, "test.duplicate.adapter")
+        }
+    }
+}
+
+final class AdapterTimeoutTests: XCTestCase {
+    actor HangingAdapter: ConsentAdapter {
+        let sdkIdentifier = "test.hanging.adapter"
+        let sdkVersion = "1.0.0"
+        let capabilitySchema = ConsentCapabilitySchema(
+            sdkIdentifier: "test.hanging.adapter",
+            supportedPurposes: [.analyticsStorage]
+        )
+
+        // Never returns on its own — simulates a real hung network call
+        // with no timeout of its own. Sleeps far longer than ConsentBus's
+        // own adapter timeout, so it's genuinely ConsentBus's timeout that
+        // produces a result here, not this sleep ending naturally.
+        func apply(_ event: ConsentEvent) async -> AdapterReceipt {
+            try? await Task.sleep(nanoseconds: 3_600_000_000_000) // 1 hour
+            return AdapterReceipt(
+                sdkIdentifier: sdkIdentifier, sdkVersion: sdkVersion,
+                appliedState: event.newState, purposeApplied: event.purpose,
+                nativeMethodCall: "should never be reached", success: true, status: .applied
+            )
+        }
+    }
+
+    // Deliberately slow (~10s, ConsentBus's fixed adapter timeout) — tests
+    // applyWithTimeout directly rather than through dispatchWithRetry's
+    // full retry wrapper (which would multiply this by up to 4x). Worth
+    // the cost: this is exactly the property whose absence caused a real
+    // crash bug earlier (a hung/failing adapter taking down the process
+    // instead of timing out), so it should be verified for real, not just
+    // reviewed by eye.
+    func testHungAdapterTimesOutInsteadOfBlockingForever() async throws {
+        let adapter = HangingAdapter()
+        let event = ConsentEvent(
+            previousState: .unknown, newState: .revoked,
+            purpose: .analyticsStorage, version: 1, sourceSignal: .userUI
+        )
+
+        let start = Date()
+        let receipt = await ConsentBus.shared.applyWithTimeout(adapter: adapter, event: event)
+        let elapsed = Date().timeIntervalSince(start)
+
+        XCTAssertLessThan(elapsed, 30, "a hung adapter must never block dispatch indefinitely")
+        XCTAssertEqual(receipt.status, .failed)
+        XCTAssertTrue(receipt.errorDescription?.contains("timed out") == true)
     }
 }

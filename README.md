@@ -27,7 +27,7 @@ This creates:
 
 ConsentBus is a lightweight Swift package that sits between your app's consent UI and your third-party SDKs:
 
-- **Atomic dispatch** — a single serialized broker propagates consent to every registered SDK adapter in one execution pass, eliminating partial-propagation race conditions
+- **Atomic dispatch** — a single broker propagates consent to every registered SDK adapter concurrently as one atomic unit, each with its own timeout so one hung adapter can't block the rest, eliminating partial-propagation race conditions
 - **Cryptographic receipts** — every SDK adapter returns a structured receipt confirming exactly what was applied, when, and via which native API call
 - **Hash-chained, persisted audit ledger** — every consent event is committed to a tamper-evident HMAC-SHA256 chain, with the key in the Keychain and entries on disk, so the record survives app relaunch instead of living only in memory
 - **Capability-aware dispatch** — each adapter declares which consent purposes it supports; ConsentBus distinguishes `NOT_SUPPORTED` from `FAILED`, giving you a precise `ComplianceCoverageScore`
@@ -124,8 +124,10 @@ All adapters other than Firebase's are currently **stubs** — they compile and 
    │   1. Per-purpose FSM validates the transition              │
    │        .granted -> .revoked  ✓                              │
    │                                                            │
-   │   2. Dispatch to every registered adapter, one pass,       │
-   │      with exponential-backoff retry on genuine failures    │
+   │   2. Dispatch to every registered adapter concurrently, so  │
+   │      all of them receive this consent change as one atomic  │
+   │      unit — each with a per-adapter timeout and exponential- │
+   │      backoff-with-jitter retry on genuine failure            │
    │        Firebase  ──▶ APPLIED                               │
    │        Meta      ──▶ APPLIED                               │
    │        AppsFlyer ──▶ FAILED (retried 3x, then recorded)    │

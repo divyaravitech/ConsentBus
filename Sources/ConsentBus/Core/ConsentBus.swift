@@ -2,13 +2,20 @@ import Foundation
 import CryptoKit
 
 /// The central consent broker: a process-resident singleton that dispatches
-/// consent events to all registered SDK adapters within a single serialized
-/// execution context, eliminating race conditions in consent propagation.
+/// consent events to every registered SDK adapter for a single consent
+/// change atomically as one unit, eliminating the window where some SDKs
+/// have received a change and others haven't.
 ///
 /// Patent reference: Application No. 64/087,949, Claims 1, 2, 10 —
 /// consent broker singleton executing on a dedicated serial execution
 /// context such that no SDK adapter dispatch operation is initiated while
-/// a prior dispatch operation is in progress.
+/// a prior dispatch operation is in progress. Adapters within a single
+/// `setConsent` call are dispatched concurrently (not sequentially) since
+/// this reading of the claim: no *new* setConsent operation's dispatch
+/// phase may begin while a *prior* setConsent operation's dispatch is
+/// still in flight — the serialization is between operations, not between
+/// individual adapters receiving the same operation's event. Confirm this
+/// reading with patent counsel before relying on it.
 @globalActor
 public actor ConsentBus {
     public static let shared = ConsentBus()
@@ -16,7 +23,7 @@ public actor ConsentBus {
     private var adapters: [any ConsentAdapter] = []
     private var fsmByPurpose: [ConsentPurpose: ConsentFSM] = [:]
     private let ledger: AuditLedger
-    public let attestationEngine: ComplianceAttestationEngine
+    private let attestationEngine: ComplianceAttestationEngine
 
     /// The public key auditors need to independently verify signed
     /// compliance reports (`ComplianceAttestationEngine.verify(_:publicKey:)`).
@@ -39,6 +46,21 @@ public actor ConsentBus {
 
     private let maxRetries = 3
     private let baseRetryDelayNanoseconds: UInt64 = 1_000_000_000 // 1s
+    private let adapterTimeoutNanoseconds: UInt64 = 10_000_000_000 // 10s
+
+    /// Monotonic, race-free dispatch counter incremented synchronously
+    /// (before any `await`) alongside each purpose's FSM transition. Used
+    /// to stamp `ConsentEvent.version`. This intentionally does NOT track
+    /// the AuditLedger's own version counter: an earlier version read that
+    /// counter speculatively via `await ledger.currentVersion() + 1`
+    /// *before* the (potentially many-second, retry-laden) dispatch phase,
+    /// which meant two concurrent `setConsent` calls — enabled by actor
+    /// reentrancy across that await — could both read the same "next"
+    /// value and stamp events with a version that didn't match the
+    /// LedgerEntry they later ended up recorded in. This counter is
+    /// incremented with no intervening suspension point, so it can never
+    /// race.
+    private var dispatchSequence: UInt64 = 0
 
     /// Keychain identity for the signing key `ConsentBus.shared` uses by
     /// default. Centralized (rather than inlined in `init()`) so nothing
@@ -98,15 +120,24 @@ public actor ConsentBus {
     /// already-established per-purpose consent decision before this call
     /// returns, so it never silently runs under its own default assumption
     /// while every other adapter already reflects the user's actual choice.
+    ///
+    /// Throws `ConsentBusError.duplicateAdapter` if an adapter with the
+    /// same `sdkIdentifier` is already registered, rather than silently
+    /// double-dispatching every future consent change to it.
     public func register(adapter: any ConsentAdapter) async throws {
+        let newIdentifier = await adapter.sdkIdentifier
+        for existing in adapters where await existing.sdkIdentifier == newIdentifier {
+            throw ConsentBusError.duplicateAdapter(sdkIdentifier: newIdentifier)
+        }
         adapters.append(adapter)
 
         for (purpose, fsm) in fsmByPurpose where fsm.currentState != .unknown {
+            dispatchSequence += 1
             let event = ConsentEvent(
                 previousState: fsm.currentState,
                 newState: fsm.currentState,
                 purpose: purpose,
-                version: await ledger.currentVersion() + 1,
+                version: dispatchSequence,
                 sourceSignal: .adapterSync
             )
             let receipt = await dispatchWithRetry(adapter: adapter, event: event)
@@ -120,9 +151,10 @@ public actor ConsentBus {
     }
 
     /// Core patented operation: validate the requested transition, then
-    /// dispatch the resulting ConsentEvent to every registered adapter
-    /// within a single serialized pass, collecting AdapterReceipts and
-    /// committing them to the tamper-evident audit ledger.
+    /// dispatch the resulting ConsentEvent to every registered adapter —
+    /// concurrently, all receiving this same consent change as one atomic
+    /// unit — collecting AdapterReceipts and committing them to the
+    /// tamper-evident audit ledger.
     @discardableResult
     public func setConsent(
         _ newState: ConsentState,
@@ -133,20 +165,28 @@ public actor ConsentBus {
         let previousState = fsm.currentState
         try fsm.transition(to: newState)
         fsmByPurpose[purpose] = fsm
+        dispatchSequence += 1
 
-        let version = await ledger.currentVersion() + 1
         let event = ConsentEvent(
             previousState: previousState,
             newState: newState,
             purpose: purpose,
-            version: version,
+            version: dispatchSequence,
             sourceSignal: source
         )
 
-        var receipts: [AdapterReceipt] = []
-        for adapter in adapters {
-            let receipt = await dispatchWithRetry(adapter: adapter, event: event)
-            receipts.append(receipt)
+        let dispatchTargets = adapters
+        let receipts = await withTaskGroup(of: (Int, AdapterReceipt).self) { [self] group in
+            for (index, adapter) in dispatchTargets.enumerated() {
+                group.addTask {
+                    (index, await self.dispatchWithRetry(adapter: adapter, event: event))
+                }
+            }
+            var ordered = [AdapterReceipt?](repeating: nil, count: dispatchTargets.count)
+            for await (index, receipt) in group {
+                ordered[index] = receipt
+            }
+            return ordered.compactMap { $0 }
         }
 
         return try await ledger.commit(
@@ -157,27 +197,84 @@ public actor ConsentBus {
         )
     }
 
-    /// Dispatch to a single adapter with exponential backoff retry on failure.
+    /// Dispatch to a single adapter with a per-attempt timeout and
+    /// exponential backoff (with jitter) retry on genuine failure.
+    ///
+    /// `nonisolated` and reads only immutable constants — it touches none
+    /// of ConsentBus's mutable actor state, so it doesn't need to
+    /// serialize through the actor's executor. That's what lets
+    /// `setConsent`'s task group actually run adapter dispatch in
+    /// parallel instead of just interleaving on one executor.
     ///
     /// Patent reference: Claim 4 — retry mechanism with exponential backoff.
-    func dispatchWithRetry(
+    nonisolated func dispatchWithRetry(
         adapter: any ConsentAdapter,
         event: ConsentEvent
     ) async -> AdapterReceipt {
         var attempt = 0
-        var lastReceipt = await adapter.apply(event)
+        var lastReceipt = await applyWithTimeout(adapter: adapter, event: event)
 
         // Only FAILED is retry-worthy — NOT_SUPPORTED is a permanent
         // capability-schema mismatch that retrying can never resolve
         // (Claim 5 distinguishes the two for exactly this reason).
         while lastReceipt.status == .failed && attempt < maxRetries {
             attempt += 1
-            let delay = baseRetryDelayNanoseconds * UInt64(pow(2.0, Double(attempt - 1)))
-            try? await Task.sleep(nanoseconds: min(delay, 30_000_000_000))
-            lastReceipt = await adapter.apply(event)
+            let baseDelay = min(baseRetryDelayNanoseconds * UInt64(pow(2.0, Double(attempt - 1))), 30_000_000_000)
+            // Equal jitter (base/2 fixed + up to base/2 random): avoids a
+            // thundering herd of adapters/devices retrying in lockstep,
+            // while keeping backoff still meaningfully increasing.
+            let half = baseDelay / 2
+            let jitteredDelay = half + UInt64.random(in: 0...max(half, 1))
+            try? await Task.sleep(nanoseconds: jitteredDelay)
+            lastReceipt = await applyWithTimeout(adapter: adapter, event: event)
         }
 
-        return lastReceipt
+        return lastReceipt.withAttemptCount(attempt + 1)
+    }
+
+    /// Races a single `apply(_:)` call against a fixed timeout so one
+    /// hung adapter (e.g. a real network call with no timeout of its own)
+    /// can't wedge dispatch — or, since ConsentBus is a global-actor
+    /// singleton every consent operation funnels through, the entire app's
+    /// consent handling — forever. Cancellation of the losing branch is
+    /// cooperative: an adapter that never checks `Task.isCancelled` keeps
+    /// running in the background after this returns a synthetic timeout
+    /// receipt, it just no longer blocks the caller.
+    nonisolated func applyWithTimeout(
+        adapter: any ConsentAdapter,
+        event: ConsentEvent
+    ) async -> AdapterReceipt {
+        let sdkIdentifier = await adapter.sdkIdentifier
+        let sdkVersion = await adapter.sdkVersion
+        let timeoutNanoseconds = adapterTimeoutNanoseconds
+
+        return await withTaskGroup(of: AdapterReceipt?.self) { group in
+            group.addTask {
+                await adapter.apply(event)
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+                return nil
+            }
+
+            let firstResult = await group.next() ?? nil
+            group.cancelAll()
+
+            if let receipt = firstResult {
+                return receipt
+            }
+            let seconds = Double(timeoutNanoseconds) / 1_000_000_000
+            return AdapterReceipt(
+                sdkIdentifier: sdkIdentifier,
+                sdkVersion: sdkVersion,
+                appliedState: event.newState,
+                purposeApplied: event.purpose,
+                nativeMethodCall: "N/A",
+                success: false,
+                status: .failed,
+                errorDescription: "Adapter did not respond within \(seconds)s (timed out)"
+            )
+        }
     }
 
     public func exportComplianceReport() async -> ComplianceAttestationReport? {
@@ -194,5 +291,16 @@ public actor ConsentBus {
     /// LedgerEntry has been altered since it was committed.
     public func verifyAuditChainIntegrity() async -> Bool {
         await ledger.verifyChainIntegrity()
+    }
+}
+
+public enum ConsentBusError: Error, CustomStringConvertible {
+    case duplicateAdapter(sdkIdentifier: String)
+
+    public var description: String {
+        switch self {
+        case .duplicateAdapter(let sdkIdentifier):
+            return "An adapter with sdkIdentifier '\(sdkIdentifier)' is already registered"
+        }
     }
 }

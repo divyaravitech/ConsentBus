@@ -42,6 +42,14 @@ public struct AdapterReceipt: Codable, Sendable {
     public let success: Bool
     public let status: PropagationStatus
     public let errorDescription: String?
+    /// Total number of times the adapter's `apply(_:)` was called before
+    /// this receipt was produced — 1 means it concluded (successfully or
+    /// not) on the first attempt; >1 means ConsentBus retried it under the
+    /// exponential-backoff policy (Claim 4) before arriving at this final
+    /// outcome. Adapters never set this themselves — it always defaults to
+    /// 1 from the public initializer; ConsentBus.dispatchWithRetry attaches
+    /// the real count once dispatch (including any retries) concludes.
+    public private(set) var attemptCount: Int
 
     public init(
         sdkIdentifier: String,
@@ -62,6 +70,16 @@ public struct AdapterReceipt: Codable, Sendable {
         self.success = success
         self.status = status
         self.errorDescription = errorDescription
+        self.attemptCount = 1
+    }
+
+    /// Internal-only: attach the real attempt count once dispatch (with
+    /// any retries) has concluded, preserving every other field — notably
+    /// `appliedAt` — exactly as the adapter produced it.
+    func withAttemptCount(_ attemptCount: Int) -> AdapterReceipt {
+        var copy = self
+        copy.attemptCount = attemptCount
+        return copy
     }
 }
 
