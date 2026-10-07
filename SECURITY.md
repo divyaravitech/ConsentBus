@@ -4,7 +4,7 @@ ConsentBus handles consent state, an HMAC signing key, and an Ed25519 signing ke
 
 ## Reporting a vulnerability
 
-Email **divya.ravi@unity3d.com** with:
+Email **divyaravi.tech@gmail.com** with:
 - A description of the issue and its potential impact
 - Steps to reproduce (a minimal Swift snippet is ideal)
 - The ConsentBus version or commit SHA affected
