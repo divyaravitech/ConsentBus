@@ -48,19 +48,33 @@ jobs:
             -scheme ConsentBus-Package \
             -destination 'generic/platform=iOS Simulator'
       - name: Test on iOS Simulator
-        # Device name may need bumping as Apple rotates the default
-        # simulator fleet each year (checked against the runner image's
-        # installed simulator list at the time this was written — see
-        # actions/runner-images macos-15-Readme.md if this destination
-        # stops resolving). A handful of Keychain-dependent persistence
-        # tests XCTSkip themselves when running in this bare-test-bundle
-        # context, which lacks a host app's Keychain entitlements — that's
-        # expected and covered by the macOS jobs above instead, which do
-        # exercise real Keychain access.
+        # Simulator device names and installed runtimes change with every
+        # runner-image update. A hardcoded device name failed the day the
+        # default Xcode moved to a release whose iOS runtime wasn't
+        # preinstalled (the destination list held only placeholders). So:
+        # pick whatever iPhone simulator exists, and download the iOS
+        # platform only when there is none.
+        #
+        # A few Keychain-dependent persistence tests XCTSkip themselves in
+        # this bare-test-bundle context, which lacks a host app's Keychain
+        # entitlements. That is expected; the macOS jobs above exercise the
+        # real Keychain.
         run: |
+          pick_simulator() {
+            xcrun simctl list devices available | grep 'iPhone' | tail -1 \
+              | grep -oE '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}' || true
+          }
+          UDID="$(pick_simulator)"
+          if [ -z "$UDID" ]; then
+            echo "No iPhone simulator for $(xcodebuild -version | head -1); downloading the iOS platform..."
+            xcodebuild -downloadPlatform iOS
+            UDID="$(pick_simulator)"
+          fi
+          [ -n "$UDID" ] || { echo "::error::no iPhone simulator available"; exit 1; }
+          echo "Using simulator $UDID"
           xcodebuild test \
             -scheme ConsentBus-Package \
-            -destination 'platform=iOS Simulator,name=iPhone 16'
+            -destination "platform=iOS Simulator,id=$UDID"
 
   spm-manifest-check:
     name: Validate Package.swift (Swift Package Index requirement)
